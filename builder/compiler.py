@@ -215,7 +215,7 @@ class MSVCCompiler:
         # Cleanup batch file
         try:
             os.remove(batch_path)
-        except:
+        except OSError:
             pass
         
         # Check result

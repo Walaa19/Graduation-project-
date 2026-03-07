@@ -106,6 +106,8 @@ class CryptoEngine:
             key = self.keys.aes_key
         
         if iv is None:
+            if self.keys is None:
+                self.generate_keys()
             iv = self.keys.aes_iv
         
         cipher = AES.new(key, AES.MODE_CBC, iv)
@@ -128,6 +130,8 @@ class CryptoEngine:
             key = self.keys.aes_key
         
         if iv is None:
+            if self.keys is None:
+                raise ValueError("No keys available for decryption")
             iv = self.keys.aes_iv
         
         cipher = AES.new(key, AES.MODE_CBC, iv)

